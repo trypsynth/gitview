@@ -170,7 +170,7 @@ impl MainWindow {
 		let frame = Frame::builder().with_title("Gitview").with_size(WINDOW_SIZE).build();
 		let open_item = build_menu_bar(&frame);
 		let panel = Panel::builder(&frame).build();
-		let views_label = StaticText::builder(&panel).with_label("&Views").build();
+		let views_label = StaticText::builder(&panel).with_label("Views").build();
 		let views = ListBox::builder(&panel).build();
 		let items_label = StaticText::builder(&panel).with_label(View::Notifications.title()).build();
 		let items = ListBox::builder(&panel).build();
