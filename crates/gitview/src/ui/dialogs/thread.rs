@@ -13,7 +13,7 @@ use wxdragon::{
 
 use super::{comment::post_comment, page::show_page};
 use crate::ui::{
-	text::{body_html, comment_count},
+	text::{body_html, comment_count, local_time},
 	worker,
 };
 
@@ -30,6 +30,7 @@ struct Post {
 	/// What the list shows: who wrote it and when, then the whole text, line breaks and all.
 	label: String,
 	heading: String,
+	/// The line under the heading, empty when the heading already says it all.
 	meta: String,
 	html: String,
 	/// The markdown as written, for quoting in a reply.
@@ -42,7 +43,7 @@ impl Post {
 		let text = html_to_text(&html);
 		let text = if text.is_empty() { "No text.".to_owned() } else { text };
 		Self {
-			label: format!("{meta}:\n{text}"),
+			label: format!("{}:\n{text}", if meta.is_empty() { &heading } else { &meta }),
 			heading,
 			meta,
 			html,
@@ -55,7 +56,7 @@ impl Post {
 		let kind = if issue.is_pull_request() { "pull request" } else { "issue" };
 		Self::new(
 			format!("{} #{}", issue.title, issue.number),
-			format!("{} opened this {kind} on {}", issue.user.login, date(&issue.created_at)),
+			format!("{} opened this {kind} on {}", issue.user.login, local_time(&issue.created_at)),
 			body_html(issue.body_html.as_deref(), issue.body.as_deref()),
 			issue.body.as_deref(),
 			&issue.html_url,
@@ -64,8 +65,8 @@ impl Post {
 
 	fn of_comment(comment: &Comment) -> Self {
 		Self::new(
-			format!("Comment by {}", comment.user.login),
-			format!("{} commented on {}", comment.user.login, date(&comment.created_at)),
+			format!("{} commented on {}", comment.user.login, local_time(&comment.created_at)),
+			String::new(),
 			body_html(comment.body_html.as_deref(), comment.body.as_deref()),
 			comment.body.as_deref(),
 			&comment.html_url,
@@ -228,8 +229,4 @@ fn bind_post_menu(
 			_ => event.skip(true),
 		}
 	});
-}
-
-fn date(timestamp: &str) -> &str {
-	timestamp.split('T').next().unwrap_or(timestamp)
 }

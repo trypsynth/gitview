@@ -55,13 +55,14 @@ pub fn build(parent: &dyn WxWidget, on_escape: impl Fn() + 'static) -> WebView {
 	view
 }
 
-/// Puts a page in the view. `heading` and `meta` are plain text; `body` is already HTML.
+/// Puts a page in the view. `heading` and `meta` are plain text, and an empty `meta` leaves its
+/// line out; `body` is already HTML.
 pub fn show(view: WebView, heading: &str, meta: &str, body: &str) {
 	let heading = escape(heading);
+	let meta = if meta.is_empty() { String::new() } else { format!("<p class=\"meta\">{}</p>", escape(meta)) };
 	let page = format!(
 		"<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>{heading}</title><style>{STYLE}</style></head>\
-		<body><h1>{heading}</h1><p class=\"meta\">{}</p>{body}</body></html>",
-		escape(meta),
+		<body><h1>{heading}</h1>{meta}{body}</body></html>",
 	);
 	view.set_page(&page, "https://github.com/");
 }
