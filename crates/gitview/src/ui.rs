@@ -1,3 +1,4 @@
+mod actions;
 mod dialogs;
 mod main_window;
 mod text;

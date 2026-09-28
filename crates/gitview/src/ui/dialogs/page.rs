@@ -33,7 +33,8 @@ pub fn open_subject<P: WxWidget + Copy + 'static>(
 	);
 }
 
-fn show_page(parent: &dyn WxWidget, heading: &str, meta: &str, body: &str) {
+/// Shows `body`, already HTML, in a web view, under `heading` and the plain-text `meta` line.
+pub fn show_page(parent: &dyn WxWidget, heading: &str, meta: &str, body: &str) {
 	let dialog = Dialog::builder(parent, heading).build();
 	let padding = dialog_padding(&dialog);
 	let view = web::build(&dialog, move || dialog.end_modal(ID_CANCEL));

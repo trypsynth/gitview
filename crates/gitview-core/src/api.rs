@@ -4,8 +4,8 @@ use ureq::RequestBuilder;
 use crate::{
 	Error,
 	models::{
-		Comment, Email, Issue, IssueState, Notification, Profile, ProfileUpdate, Repository, SocialAccount,
-		SubjectDetails, User,
+		CloseReason, Comment, Email, Issue, IssueState, Notification, Profile, ProfileUpdate, Repository,
+		SocialAccount, SubjectDetails, User,
 	},
 };
 
@@ -19,6 +19,15 @@ const USER_AGENT: &str = concat!("gitview/", env!("CARGO_PKG_VERSION"));
 #[derive(Serialize)]
 struct NewComment<'a> {
 	body: &'a str,
+}
+
+#[derive(Serialize)]
+struct StateChange {
+	state: &'static str,
+	#[serde(skip_serializing_if = "Option::is_none")]
+	state_reason: Option<&'static str>,
+	#[serde(skip_serializing_if = "Option::is_none")]
+	duplicate_issue_id: Option<u64>,
 }
 
 #[derive(Serialize)]
@@ -109,6 +118,29 @@ impl Client {
 		Ok(())
 	}
 
+	/// Moves a notification out of the inbox, as the Done button on GitHub does.
+	pub fn mark_notification_done(&self, id: &str) -> Result<(), Error> {
+		self.authorize(self.agent.delete(format!("{API_URL}/notifications/threads/{id}"))).call()?;
+		Ok(())
+	}
+
+	/// Stops notifications for a thread until the user comments or is mentioned in it.
+	pub fn unsubscribe(&self, id: &str) -> Result<(), Error> {
+		self.authorize(self.agent.delete(format!("{API_URL}/notifications/threads/{id}/subscription"))).call()?;
+		Ok(())
+	}
+
+	/// Stars `repo` (`owner/name`), or unstars it when `starred` is false.
+	pub fn set_starred(&self, repo: &str, starred: bool) -> Result<(), Error> {
+		let url = format!("{API_URL}/user/starred/{repo}");
+		if starred {
+			self.authorize(self.agent.put(url)).send_empty()?;
+		} else {
+			self.authorize(self.agent.delete(url)).call()?;
+		}
+		Ok(())
+	}
+
 	pub fn repositories(&self) -> Result<Vec<Repository>, Error> {
 		self.get("/user/repos?sort=updated&per_page=100")
 	}
@@ -138,6 +170,35 @@ impl Client {
 
 	pub fn comments(&self, repo: &str, number: u64) -> Result<Vec<Comment>, Error> {
 		self.get_rendered(&format!("/repos/{repo}/issues/{number}/comments?per_page=100"))
+	}
+
+	pub fn close_issue(&self, repo: &str, number: u64, reason: CloseReason) -> Result<(), Error> {
+		let (state_reason, duplicate_issue_id) = match reason {
+			CloseReason::Completed => ("completed", None),
+			CloseReason::NotPlanned => ("not_planned", None),
+			CloseReason::Duplicate(id) => ("duplicate", Some(id)),
+		};
+		self.change_state(
+			repo,
+			number,
+			StateChange { state: "closed", state_reason: Some(state_reason), duplicate_issue_id },
+		)
+	}
+
+	/// Closes a pull request without merging it. Pull requests take no close reason.
+	pub fn close_pull_request(&self, repo: &str, number: u64) -> Result<(), Error> {
+		self.change_state(repo, number, StateChange { state: "closed", state_reason: None, duplicate_issue_id: None })
+	}
+
+	/// Reopens an issue or pull request.
+	pub fn reopen(&self, repo: &str, number: u64) -> Result<(), Error> {
+		self.change_state(repo, number, StateChange { state: "open", state_reason: None, duplicate_issue_id: None })
+	}
+
+	// Pull requests are issues too, so the issue endpoint opens and closes both.
+	fn change_state(&self, repo: &str, number: u64, change: StateChange) -> Result<(), Error> {
+		self.authorize(self.agent.patch(format!("{API_URL}/repos/{repo}/issues/{number}"))).send_json(change)?;
+		Ok(())
 	}
 
 	pub fn add_comment(&self, repo: &str, number: u64, body: &str) -> Result<Comment, Error> {

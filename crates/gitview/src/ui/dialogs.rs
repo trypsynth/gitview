@@ -1,12 +1,13 @@
 mod comment;
-mod issue;
 mod issues;
+mod page;
 mod profile;
 mod sign_in;
-mod subject;
+mod thread;
 
-pub use issue::open_issue;
-pub use issues::open_issues;
+pub use comment::post_comment;
+pub use issues::{Listing, open_issues};
+pub use page::open_subject;
 pub use profile::edit_profile;
 pub use sign_in::show_sign_in_dialog;
-pub use subject::open_subject;
+pub use thread::open_issue;

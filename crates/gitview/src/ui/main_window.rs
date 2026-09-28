@@ -2,20 +2,30 @@ use std::{cell::RefCell, rc::Rc, sync::Arc};
 
 use gitview_core::{
 	Client, Error,
-	models::{Issue, IssueState, Notification, Repository},
+	models::{CloseReason, Issue, IssueState, Notification, Repository},
 };
-use wx_utils::{show_error, show_warning};
-use wxdragon::{prelude::*, timer::Timer};
+use wx_utils::{prompt_text, show_error, show_warning};
+use wxdragon::{
+	clipboard::Clipboard,
+	prelude::*,
+	timer::Timer,
+	utils::{BrowserLaunchFlags, launch_default_browser},
+};
 
-use super::{dialogs, text::comment_count, worker};
+use super::{
+	actions::{self, Action, Selected},
+	dialogs::{self, Listing},
+	text::comment_count,
+	worker,
+};
 use crate::token;
 
-const ID_OPEN: i32 = ID_HIGHEST + 1;
 const ID_REFRESH: i32 = ID_HIGHEST + 2;
 const ID_SIGN_OUT: i32 = ID_HIGHEST + 3;
 const ID_PROFILE: i32 = ID_HIGHEST + 4;
 const ID_FILTER_FIRST: i32 = ID_HIGHEST + 10;
-const FILTER_MENU: usize = 1;
+const ACTIONS_MENU: usize = 1;
+const FILTER_MENU: usize = 2;
 const WINDOW_SIZE: Size = Size { width: 800, height: 600 };
 const LOADING: &str = "Loading...";
 /// How often the view on screen is fetched again. GitHub asks clients not to poll the
@@ -131,7 +141,6 @@ pub struct MainWindow {
 	views: ListBox,
 	items: ListBox,
 	items_label: StaticText,
-	open_item: MenuItem,
 	poll_timer: Rc<Timer<Frame>>,
 	state: Rc<RefCell<State>>,
 }
@@ -139,7 +148,7 @@ pub struct MainWindow {
 impl MainWindow {
 	pub fn open() {
 		let frame = Frame::builder().with_title("Gitview").with_size(WINDOW_SIZE).build();
-		let open_item = build_menu_bar(&frame);
+		build_menu_bar(&frame);
 		let panel = Panel::builder(&frame).build();
 		let views_label = StaticText::builder(&panel).with_label("Views").build();
 		let views = ListBox::builder(&panel).build();
@@ -150,17 +159,11 @@ impl MainWindow {
 		}
 		views.set_selection(0, true);
 		lay_out(panel, [(views_label, views), (items_label, items)]);
-		let window = Self {
-			frame,
-			views,
-			items,
-			items_label,
-			open_item,
-			poll_timer: Rc::new(Timer::new(&frame)),
-			state: Rc::default(),
-		};
+		let window =
+			Self { frame, views, items, items_label, poll_timer: Rc::new(Timer::new(&frame)), state: Rc::default() };
 		window.bind_events();
 		window.update_filter_menu();
+		window.update_actions_menu();
 		frame.show(true);
 		views.set_focus();
 		worker::spawn(token::load, move |token| match token {
@@ -172,13 +175,16 @@ impl MainWindow {
 	fn bind_events(&self) {
 		let window = self.clone();
 		self.frame.on_menu_selected(move |event| match event.get_id() {
-			ID_OPEN => window.open_selected(),
 			ID_REFRESH => window.fetch_all(),
 			ID_PROFILE => window.edit_profile(),
 			ID_SIGN_OUT => window.sign_out(),
 			ID_EXIT => window.frame.close(false),
 			id if (ID_FILTER_FIRST..ID_FILTER_FIRST + 3).contains(&id) => window.set_filter(id - ID_FILTER_FIRST),
-			_ => event.skip(true),
+			// The context menu's choices arrive here too, passed up from the list.
+			id => match Action::from_id(id) {
+				Some(action) => window.perform(action),
+				None => event.skip(true),
+			},
 		});
 		let window = self.clone();
 		self.views.on_selection_changed(move |event| {
@@ -191,7 +197,12 @@ impl MainWindow {
 			}
 		});
 		let window = self.clone();
-		self.items.on_item_double_clicked(move |_| window.open_selected());
+		self.items.on_item_double_clicked(move |_| window.perform(Action::Open));
+		let window = self.clone();
+		self.items.on_selection_changed(move |_| window.update_actions_menu());
+		let window = self.clone();
+		// ListBox has no context menu method of its own, so the event is bound directly.
+		self.items.bind_internal(EventType::CONTEXT_MENU, move |_| window.show_context_menu());
 		let window = self.clone();
 		self.poll_timer.on_tick(move |_| window.fetch_all());
 	}
@@ -281,7 +292,7 @@ impl MainWindow {
 			drop(state);
 			self.items.clear();
 			self.items.append(LOADING);
-			self.open_item.enable(false);
+			self.update_actions_menu();
 			// Startup loads every view, so this only happens when that fetch is still in
 			// flight or failed.
 			self.fetch(view);
@@ -310,7 +321,7 @@ impl MainWindow {
 		}
 		self.items.clear();
 		self.items.append(LOADING);
-		self.open_item.enable(false);
+		self.update_actions_menu();
 		self.fetch(self.state.borrow().view);
 	}
 
@@ -414,41 +425,184 @@ impl MainWindow {
 			self.items.append(view.empty_message());
 		}
 		self.items.set_selection(selection.min(self.items.get_count() - 1), true);
-		self.open_item.enable(!labels.is_empty());
+		// Setting the selection in code raises no event, so the menu is brought up to date by hand.
+		self.update_actions_menu();
 	}
 
-	fn open_selected(&self) {
-		let Some(client) = self.state.borrow().client.clone() else {
-			return;
-		};
-		let Some(index) = self.items.get_selection().map(|index| index as usize) else {
-			return;
+	/// A copy of the selected item, or `None` while the list holds only a message.
+	fn selected(&self) -> Option<Selected> {
+		let index = self.items.get_selection()? as usize;
+		let state = self.state.borrow();
+		Some(match &state.loaded[state.view.index()].as_ref()?.items {
+			Items::Notifications(notifications) => Selected::Notification(notifications.get(index)?.clone()),
+			Items::Repositories(repositories) => Selected::Repository(repositories.get(index)?.clone()),
+			Items::Issues(issues) => Selected::Issue(issues.get(index)?.clone()),
+		})
+	}
+
+	/// Whether `selected` is a repository in the Starred view's list.
+	fn is_starred(&self, selected: &Selected) -> bool {
+		let Selected::Repository(repository) = selected else {
+			return false;
 		};
 		let state = self.state.borrow();
-		let Some(loaded) = state.loaded[state.view.index()].as_ref() else {
+		matches!(
+			state.loaded[View::Starred.index()].as_ref().map(|loaded| &loaded.items),
+			Some(Items::Repositories(starred)) if starred.iter().any(|star| star.full_name == repository.full_name)
+		)
+	}
+
+	/// Rebuilds the Actions menu for the selected item, so its shortcuts act on that item.
+	fn update_actions_menu(&self) {
+		let Some(menu_bar) = self.frame.get_menu_bar() else {
 			return;
 		};
-		match &loaded.items {
-			Items::Notifications(notifications) => {
-				let Some(notification) = notifications.get(index) else {
+		let selected = self.selected();
+		let starred = selected.as_ref().is_some_and(|selected| self.is_starred(selected));
+		menu_bar.replace(ACTIONS_MENU, actions::menu(selected.as_ref(), starred), "&Actions");
+	}
+
+	fn show_context_menu(&self) {
+		let Some(selected) = self.selected() else {
+			return;
+		};
+		let mut menu = actions::menu(Some(&selected), self.is_starred(&selected));
+		self.items.popup_menu(&mut menu, None);
+		menu.destroy_menu();
+	}
+
+	fn perform(&self, action: Action) {
+		let (Some(client), Some(selected)) = (self.state.borrow().client.clone(), self.selected()) else {
+			return;
+		};
+		match action {
+			Action::Open => self.open_item(client, &selected),
+			Action::Comment => {
+				let Some((repo, number)) = selected.issue() else {
 					return;
 				};
-				self.open_notification(client, notification);
+				let window = self.clone();
+				dialogs::post_comment(self.frame, client, repo, number, "", move |_| window.fetch_all());
 			}
-			Items::Repositories(repositories) => {
-				let Some(repository) = repositories.get(index) else {
+			Action::CloseCompleted | Action::CloseNotPlanned | Action::ClosePullRequest | Action::Reopen => {
+				let Some((repo, number)) = selected.issue() else {
 					return;
 				};
-				dialogs::open_issues(self.frame, client, repository.full_name.clone(), state.issue_filter);
+				self.change(move || match action {
+					Action::CloseCompleted => client.close_issue(&repo, number, CloseReason::Completed),
+					Action::CloseNotPlanned => client.close_issue(&repo, number, CloseReason::NotPlanned),
+					Action::ClosePullRequest => client.close_pull_request(&repo, number),
+					_ => client.reopen(&repo, number),
+				});
 			}
-			Items::Issues(issues) => {
-				let Some((issue, repository)) = issues.get(index).and_then(|issue| Some((issue, issue.repository()?)))
-				else {
+			Action::CloseDuplicate => self.close_as_duplicate(client, &selected),
+			Action::MarkRead | Action::MarkDone | Action::Unsubscribe => {
+				let Selected::Notification(notification) = selected else {
 					return;
 				};
-				dialogs::open_issue(self.frame, client, repository.to_string(), issue.number);
+				let id = notification.id;
+				self.change(move || match action {
+					Action::MarkRead => client.mark_notification_read(&id),
+					Action::MarkDone => client.mark_notification_done(&id),
+					_ => client.unsubscribe(&id),
+				});
+			}
+			Action::Issues | Action::PullRequests => {
+				let Selected::Repository(repository) = selected else {
+					return;
+				};
+				let listing = if action == Action::Issues { Listing::Issues } else { Listing::PullRequests };
+				let state = self.state.borrow().issue_filter;
+				dialogs::open_issues(self.frame, client, repository.full_name, state, listing);
+			}
+			Action::Star | Action::Unstar => {
+				let Selected::Repository(repository) = selected else {
+					return;
+				};
+				self.change(move || client.set_starred(&repository.full_name, action == Action::Star));
+			}
+			Action::CopyLink => self.with_link(client, &selected, |url| {
+				Clipboard::get().set_text(url);
+			}),
+			Action::OpenInBrowser => {
+				self.with_link(client, &selected, |url| {
+					launch_default_browser(url, BrowserLaunchFlags::Default);
+				});
 			}
 		}
+	}
+
+	fn open_item(&self, client: Arc<Client>, selected: &Selected) {
+		match selected {
+			Selected::Notification(notification) => self.open_notification(client, notification),
+			Selected::Repository(repository) => {
+				let state = self.state.borrow().issue_filter;
+				dialogs::open_issues(self.frame, client, repository.full_name.clone(), state, Listing::Both);
+			}
+			Selected::Issue(_) => {
+				if let Some((repo, number)) = selected.issue() {
+					dialogs::open_issue(self.frame, client, repo, number);
+				}
+			}
+		}
+	}
+
+	/// Makes a change on GitHub, then fetches every view again so the lists show it.
+	fn change(&self, job: impl FnOnce() -> Result<(), Error> + Send + 'static) {
+		let window = self.clone();
+		worker::spawn(job, move |result| match result {
+			Ok(()) => window.fetch_all(),
+			Err(error) => show_error(&window.frame, error, "GitHub Did Not Make the Change"),
+		});
+	}
+
+	fn close_as_duplicate(&self, client: Arc<Client>, selected: &Selected) {
+		let Some((repo, number)) = selected.issue() else {
+			return;
+		};
+		let Some(answer) = prompt_text(
+			&self.frame,
+			"Duplicate of which issue? Enter its number, owner/name#number, or its link.",
+			"Close as Duplicate",
+		) else {
+			return;
+		};
+		let Some((original_repo, original_number)) = parse_issue_reference(&answer, &repo) else {
+			show_error(&self.frame, format!("\"{}\" doesn't name an issue.", answer.trim()), "Close as Duplicate");
+			return;
+		};
+		// GitHub takes the original's id rather than its number, so it is looked up first.
+		self.change(move || {
+			let original = client.issue(&original_repo, original_number)?;
+			client.close_issue(&repo, number, CloseReason::Duplicate(original.id))
+		});
+	}
+
+	/// Hands `use_link` the selected item's page on GitHub. Notifications other than issues
+	/// only say where their page is once fetched.
+	fn with_link(&self, client: Arc<Client>, selected: &Selected, use_link: impl FnOnce(&str) + 'static) {
+		let (url, subject_url) = match selected {
+			Selected::Repository(repository) => (Some(repository.html_url.clone()), None),
+			Selected::Issue(issue) => (Some(issue.html_url.clone()), None),
+			Selected::Notification(notification) => (notification.issue_url(), notification.subject.url.clone()),
+		};
+		if let Some(url) = url {
+			use_link(&url);
+			return;
+		}
+		let frame = self.frame;
+		let Some(subject_url) = subject_url else {
+			show_error(&frame, "GitHub gives no link for this notification.", "No Link");
+			return;
+		};
+		worker::spawn(
+			move || client.subject(&subject_url),
+			move |result| match result.map(|details| details.html_url) {
+				Ok(Some(url)) => use_link(&url),
+				Ok(None) => show_error(&frame, "GitHub gives no link for this notification.", "No Link"),
+				Err(error) => show_error(&frame, error, "Could Not Get the Link"),
+			},
+		);
 	}
 
 	/// Opens the issue thread behind a notification, or for releases and the like, what the
@@ -477,20 +631,36 @@ impl MainWindow {
 	}
 }
 
-/// Builds the menu bar and returns the Open item, which is disabled while the list is empty.
-fn build_menu_bar(frame: &Frame) -> MenuItem {
+/// Builds the menu bar. The Actions and Filter menus start empty, since what they hold depends
+/// on the selected item and view.
+fn build_menu_bar(frame: &Frame) {
 	let file_menu = Menu::builder().build();
-	let open_item = file_menu.append(ID_OPEN, "&Open\tEnter", "Open the selected item", ItemKind::Normal);
 	file_menu.append(ID_REFRESH, "&Refresh\tF5", "Reload the selected view", ItemKind::Normal);
 	file_menu.append_separator();
 	file_menu.append(ID_PROFILE, "Edit &Profile...", "Change your public GitHub profile", ItemKind::Normal);
 	file_menu.append(ID_SIGN_OUT, "Sign O&ut", "Forget your GitHub sign-in", ItemKind::Normal);
 	file_menu.append(ID_EXIT, "E&xit", "Close Gitview", ItemKind::Normal);
-	let filter_menu = Menu::builder().build();
-	frame.set_menu_bar(MenuBar::builder().append(file_menu, "&File").append(filter_menu, "F&ilter").build());
-	let open_item = open_item.expect("the Open menu item");
-	open_item.enable(false);
-	open_item
+	frame.set_menu_bar(
+		MenuBar::builder()
+			.append(file_menu, "&File")
+			.append(Menu::builder().build(), "&Actions")
+			.append(Menu::builder().build(), "F&ilter")
+			.build(),
+	);
+}
+
+/// Reads an issue reference: `12` or `#12` in `repo`, `owner/name#12`, or a link to it.
+fn parse_issue_reference(text: &str, repo: &str) -> Option<(String, u64)> {
+	let text = text.trim();
+	let text = text.strip_prefix("https://github.com/").unwrap_or(text);
+	let (other_repo, number) = text
+		.split_once('#')
+		.or_else(|| text.split_once("/issues/"))
+		.or_else(|| text.split_once("/pull/"))
+		.unwrap_or(("", text));
+	let number = number.trim_end_matches('/').parse().ok()?;
+	let other_repo = other_repo.trim();
+	Some((if other_repo.is_empty() { repo.to_owned() } else { other_repo.to_owned() }, number))
 }
 
 // Views, then the items in the selected view; opening an item shows what it says in a dialog of
@@ -551,4 +721,26 @@ fn issue_label(issue: &Issue) -> String {
 		issue.user.login,
 		comment_count(issue.comments),
 	)
+}
+
+#[cfg(test)]
+mod tests {
+	use super::parse_issue_reference;
+
+	#[test]
+	fn issue_references_name_a_repository_and_number() {
+		let here = |number| Some(("me/app".to_owned(), number));
+		assert_eq!(parse_issue_reference("12", "me/app"), here(12));
+		assert_eq!(parse_issue_reference(" #12 ", "me/app"), here(12));
+		assert_eq!(parse_issue_reference("them/lib#3", "me/app"), Some(("them/lib".to_owned(), 3)));
+		assert_eq!(
+			parse_issue_reference("https://github.com/them/lib/issues/3", "me/app"),
+			Some(("them/lib".to_owned(), 3))
+		);
+		assert_eq!(
+			parse_issue_reference("https://github.com/them/lib/pull/4/", "me/app"),
+			Some(("them/lib".to_owned(), 4))
+		);
+		assert_eq!(parse_issue_reference("soon", "me/app"), None);
+	}
 }

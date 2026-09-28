@@ -49,11 +49,21 @@ pub struct SocialAccount {
 #[derive(Debug, Clone, Deserialize)]
 pub struct Repository {
 	pub full_name: String,
+	pub html_url: String,
 	pub description: Option<String>,
 	pub private: bool,
 	pub fork: bool,
 	pub stargazers_count: u64,
 	pub open_issues_count: u64,
+}
+
+/// Why an issue was closed, as GitHub records it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CloseReason {
+	Completed,
+	NotPlanned,
+	/// A duplicate of the issue with this id (not number).
+	Duplicate(u64),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,6 +97,8 @@ impl IssueState {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Issue {
+	/// GitHub's id for the issue, which marking another issue as its duplicate takes.
+	pub id: u64,
 	pub number: u64,
 	pub title: String,
 	pub state: String,
@@ -96,6 +108,7 @@ pub struct Issue {
 	pub body_html: Option<String>,
 	pub comments: u64,
 	pub created_at: String,
+	pub html_url: String,
 	pull_request: Option<IgnoredAny>,
 	/// Only the search endpoint sends this; the per-repository listings leave it out.
 	repository_url: Option<String>,
@@ -105,6 +118,11 @@ impl Issue {
 	#[must_use]
 	pub const fn is_pull_request(&self) -> bool {
 		self.pull_request.is_some()
+	}
+
+	#[must_use]
+	pub fn is_open(&self) -> bool {
+		self.state == "open"
 	}
 
 	/// The `owner/name` the issue belongs to, for results that did not come from one repository.
@@ -120,6 +138,7 @@ pub struct Comment {
 	pub body: Option<String>,
 	pub body_html: Option<String>,
 	pub created_at: String,
+	pub html_url: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -139,6 +158,20 @@ impl Notification {
 			return None;
 		}
 		self.subject.url.as_deref()?.rsplit('/').next()?.parse().ok()
+	}
+
+	#[must_use]
+	pub fn is_pull_request(&self) -> bool {
+		self.subject.kind == "PullRequest"
+	}
+
+	/// The issue or pull request's page on GitHub. Other kinds only say where theirs is once
+	/// fetched, in [`SubjectDetails::html_url`].
+	#[must_use]
+	pub fn issue_url(&self) -> Option<String> {
+		let number = self.issue_number()?;
+		let kind = if self.is_pull_request() { "pull" } else { "issues" };
+		Some(format!("https://github.com/{}/{kind}/{number}", self.repository.full_name))
 	}
 }
 
@@ -164,6 +197,7 @@ pub struct SubjectDetails {
 	pub tag_name: Option<String>,
 	pub body: Option<String>,
 	pub body_html: Option<String>,
+	pub html_url: Option<String>,
 }
 
 impl SubjectDetails {
