@@ -1,17 +1,13 @@
-use std::{cell::RefCell, collections::HashMap, rc::Rc, sync::Arc};
+use std::{cell::RefCell, rc::Rc, sync::Arc};
 
 use gitview_core::{
 	Client, Error,
 	models::{Issue, IssueState, Notification, Repository},
 };
 use wx_utils::{show_error, show_warning};
-use wxdragon::{prelude::*, timer::Timer, widgets::WebView};
+use wxdragon::{prelude::*, timer::Timer};
 
-use super::{
-	dialogs,
-	text::{body_html, comment_count},
-	web, worker,
-};
+use super::{dialogs, text::comment_count, worker};
 use crate::token;
 
 const ID_OPEN: i32 = ID_HIGHEST + 1;
@@ -25,9 +21,6 @@ const LOADING: &str = "Loading...";
 /// How often the view on screen is fetched again. GitHub asks clients not to poll the
 /// notifications endpoint more than once a minute.
 const POLL_INTERVAL_MS: i32 = 60_000;
-/// How long the list cursor has to rest on a notification before its text is fetched, so
-/// arrowing through fifty of them does not fire fifty requests.
-const CONTENT_DELAY_MS: i32 = 400;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum View {
@@ -83,21 +76,6 @@ impl View {
 	}
 }
 
-/// Where a notification's text comes from.
-enum ContentSource {
-	Issue { repo: String, number: u64 },
-	Subject { url: String },
-}
-
-impl ContentSource {
-	fn of(notification: &Notification) -> Option<Self> {
-		if let Some(number) = notification.issue_number() {
-			return Some(Self::Issue { repo: notification.repository.full_name.clone(), number });
-		}
-		Some(Self::Subject { url: notification.subject.url.clone()? })
-	}
-}
-
 enum Items {
 	Notifications(Vec<Notification>),
 	Repositories(Vec<Repository>),
@@ -131,10 +109,6 @@ struct State {
 	/// Set while the sign-in dialog is up, so the five views in flight cannot each raise
 	/// one of their own when the token turns out to be dead.
 	signing_in: bool,
-	/// Notification bodies already fetched, by notification id.
-	contents: HashMap<String, String>,
-	/// The notification whose text the delay timer is about to fetch.
-	pending: Option<(String, ContentSource)>,
 }
 
 impl Default for State {
@@ -147,8 +121,6 @@ impl Default for State {
 			unread_only: true,
 			issue_filter: IssueState::Open,
 			signing_in: false,
-			contents: HashMap::new(),
-			pending: None,
 		}
 	}
 }
@@ -159,10 +131,8 @@ pub struct MainWindow {
 	views: ListBox,
 	items: ListBox,
 	items_label: StaticText,
-	content: WebView,
 	open_item: MenuItem,
 	poll_timer: Rc<Timer<Frame>>,
-	content_timer: Rc<Timer<Frame>>,
 	state: Rc<RefCell<State>>,
 }
 
@@ -175,22 +145,18 @@ impl MainWindow {
 		let views = ListBox::builder(&panel).build();
 		let items_label = StaticText::builder(&panel).with_label(View::Notifications.title()).build();
 		let items = ListBox::builder(&panel).build();
-		let content_label = StaticText::builder(&panel).with_label("Content").build();
-		let content = web::build(&panel, move || items.set_focus());
 		for view in View::ALL {
 			views.append(view.title());
 		}
 		views.set_selection(0, true);
-		lay_out(panel, [(views_label, views), (items_label, items)], content_label, content);
+		lay_out(panel, [(views_label, views), (items_label, items)]);
 		let window = Self {
 			frame,
 			views,
 			items,
 			items_label,
-			content,
 			open_item,
 			poll_timer: Rc::new(Timer::new(&frame)),
-			content_timer: Rc::new(Timer::new(&frame)),
 			state: Rc::default(),
 		};
 		window.bind_events();
@@ -226,10 +192,6 @@ impl MainWindow {
 		});
 		let window = self.clone();
 		self.items.on_item_double_clicked(move |_| window.open_selected());
-		let window = self.clone();
-		self.items.on_selection_changed(move |_| window.show_content());
-		let window = self.clone();
-		self.content_timer.on_tick(move |_| window.fetch_content());
 		let window = self.clone();
 		self.poll_timer.on_tick(move |_| window.fetch_all());
 	}
@@ -453,12 +415,6 @@ impl MainWindow {
 		}
 		self.items.set_selection(selection.min(self.items.get_count() - 1), true);
 		self.open_item.enable(!labels.is_empty());
-		// Setting the selection in code raises no event, so the pane is refreshed by hand.
-		if labels.is_empty() {
-			web::show(self.content, view.title(), "", &web::paragraph(view.empty_message()));
-		} else {
-			self.show_content();
-		}
 	}
 
 	fn open_selected(&self) {
@@ -495,125 +451,29 @@ impl MainWindow {
 		}
 	}
 
-	/// Puts the selected item's text in the content pane. Everything but a notification is
-	/// already in memory; a notification's own text is fetched once the cursor settles.
-	fn show_content(&self) {
-		let Some(index) = self.items.get_selection().map(|index| index as usize) else {
-			return;
-		};
-		self.content_timer.stop();
-		let mut state = self.state.borrow_mut();
-		state.pending = None;
-		let Some(loaded) = state.loaded[state.view.index()].as_ref() else {
-			web::show(self.content, "Loading", "", "");
-			return;
-		};
-		match &loaded.items {
-			Items::Notifications(notifications) => {
-				let Some(notification) = notifications.get(index) else {
-					return;
-				};
-				let heading = notification.subject.title.clone();
-				let meta = format!(
-					"{} in {}. {}.",
-					kind_label(&notification.subject.kind),
-					notification.repository.full_name,
-					notification.reason.replace('_', " "),
-				);
-				let Some(source) = ContentSource::of(notification) else {
-					drop(state);
-					web::show(self.content, &heading, &meta, "<p>GitHub keeps no text for this kind.</p>");
-					return;
-				};
-				if let Some(body) = state.contents.get(&notification.id) {
-					let body = body.clone();
-					drop(state);
-					web::show(self.content, &heading, &meta, &body);
-					return;
-				}
-				state.pending = Some((notification.id.clone(), source));
-				drop(state);
-				web::show(self.content, &heading, &meta, "<p>Loading...</p>");
-				self.content_timer.start(CONTENT_DELAY_MS, true);
-			}
-			Items::Repositories(repositories) => {
-				let Some(repository) = repositories.get(index) else {
-					return;
-				};
-				let meta = format!(
-					"{}{}. {} stars, {} open issues.",
-					if repository.private { "Private" } else { "Public" },
-					if repository.fork { ", fork" } else { "" },
-					repository.stargazers_count,
-					repository.open_issues_count,
-				);
-				let body = format!(
-					"{}<p><a href=\"https://github.com/{}\">Open on GitHub</a></p>",
-					web::paragraph(repository.description.as_deref().unwrap_or("No description.")),
-					repository.full_name,
-				);
-				let heading = repository.full_name.clone();
-				drop(state);
-				web::show(self.content, &heading, &meta, &body);
-			}
-			Items::Issues(issues) => {
-				let Some(issue) = issues.get(index) else {
-					return;
-				};
-				let heading = format!("{} #{}", issue.title, issue.number);
-				let meta = format!(
-					"{} in {}, {}. Opened by {}. {}.",
-					if issue.is_pull_request() { "Pull request" } else { "Issue" },
-					issue.repository().unwrap_or("unknown"),
-					issue.state,
-					issue.user.login,
-					comment_count(issue.comments),
-				);
-				let body = body_html(issue.body_html.as_deref(), issue.body.as_deref());
-				drop(state);
-				web::show(self.content, &heading, &meta, &body);
-			}
-		}
-	}
-
-	/// Runs once the list cursor has rested on a notification, and fills the pane with what
-	/// the notification points at.
-	fn fetch_content(&self) {
-		let (Some(client), Some((id, source))) = ({
-			let mut state = self.state.borrow_mut();
-			(state.client.clone(), state.pending.take())
-		}) else {
-			return;
-		};
-		let window = self.clone();
-		worker::spawn(
-			move || match &source {
-				ContentSource::Issue { repo, number } => client
-					.issue(repo, *number)
-					.map(|issue| body_html(issue.body_html.as_deref(), issue.body.as_deref())),
-				ContentSource::Subject { url } => {
-					client.subject(url).map(|details| body_html(details.body_html.as_deref(), details.body.as_deref()))
-				}
-			},
-			move |result| {
-				let Ok(body) = result else {
-					return;
-				};
-				window.state.borrow_mut().contents.insert(id, body);
-				window.show_content();
-			},
-		);
-	}
-
-	/// Opens the issue thread behind a notification. Releases and the like have no thread, and
-	/// their text is already in the content pane.
+	/// Opens the issue thread behind a notification, or for releases and the like, what the
+	/// notification points at.
 	fn open_notification(&self, client: Arc<Client>, notification: &Notification) {
 		let read_client = Arc::clone(&client);
 		let id = notification.id.clone();
 		worker::spawn(move || read_client.mark_notification_read(&id), |_| {});
 		if let Some(number) = notification.issue_number() {
 			dialogs::open_issue(self.frame, client, notification.repository.full_name.clone(), number);
+			return;
 		}
+		let meta = format!(
+			"{} in {}. {}.",
+			kind_label(&notification.subject.kind),
+			notification.repository.full_name,
+			notification.reason.replace('_', " "),
+		);
+		dialogs::open_subject(
+			self.frame,
+			client,
+			notification.subject.title.clone(),
+			meta,
+			notification.subject.url.clone(),
+		);
 	}
 }
 
@@ -633,10 +493,9 @@ fn build_menu_bar(frame: &Frame) -> MenuItem {
 	open_item
 }
 
-// Views, then the items in the selected view, then what the selected item says: the same
-// left-to-right split fedra uses for timelines and posts. Each label sits above its control so
-// screen readers use it as that control's name.
-fn lay_out(panel: Panel, lists: [(StaticText, ListBox); 2], content_label: StaticText, content: WebView) {
+// Views, then the items in the selected view; opening an item shows what it says in a dialog of
+// its own. Each label sits above its control so screen readers use it as that control's name.
+fn lay_out(panel: Panel, lists: [(StaticText, ListBox); 2]) {
 	let padding = panel.from_dip_int(wx_utils::DIALOG_PADDING);
 	let sizer = BoxSizer::builder(Orientation::Horizontal).build();
 	for (weight, (label, list)) in [1, 2].into_iter().zip(lists) {
@@ -645,10 +504,6 @@ fn lay_out(panel: Panel, lists: [(StaticText, ListBox); 2], content_label: Stati
 		column.add(&list, 1, SizerFlag::Expand, 0);
 		sizer.add_sizer(&column, weight, SizerFlag::Expand | SizerFlag::All, padding);
 	}
-	let content_column = BoxSizer::builder(Orientation::Vertical).build();
-	content_column.add(&content_label, 0, SizerFlag::empty(), 0);
-	content_column.add(&content, 1, SizerFlag::Expand, 0);
-	sizer.add_sizer(&content_column, 2, SizerFlag::Expand | SizerFlag::All, padding);
 	panel.set_sizer(sizer, true);
 }
 
