@@ -28,33 +28,35 @@ pub fn show_sign_in_dialog(parent: &dyn WxWidget) -> Option<String> {
 			return None;
 		}
 	};
+	let verification_uri = code.verification_uri.clone();
+	let copied = Clipboard::get().set_text(&code.user_code);
 	let dialog = Dialog::builder(parent, TITLE).build();
 	let padding = dialog_padding(&dialog);
-	let intro = StaticText::builder(&dialog)
-		.with_label("Enter this code on GitHub. Gitview continues when you approve it.")
-		.build();
-	let code_label = StaticText::builder(&dialog).with_label("Sign-in &code:").build();
-	let code_field = TextCtrl::builder(&dialog).with_value(&code.user_code).with_style(TextCtrlStyle::ReadOnly).build();
-	let open_button = Button::builder(&dialog).with_label("Copy Code and &Open GitHub").build();
+	let message = if copied {
+		format!(
+			"Your sign-in code, {}, is on the clipboard. Paste it into GitHub in your browser. Gitview continues when you approve it.",
+			code.user_code
+		)
+	} else {
+		"Gitview couldn't copy your sign-in code. Enter it into GitHub in your browser. Gitview continues when you approve it.".to_owned()
+	};
+	let intro = StaticText::builder(&dialog).with_label(&message).build();
+	intro.wrap(intro.from_dip_int(400));
 	let cancel_button = Button::builder(&dialog).with_id(ID_CANCEL).with_label("Cancel").build();
 	dialog.set_escape_id(ID_CANCEL);
-	open_button.set_default();
-	let user_code = code.user_code.clone();
-	let verification_uri = code.verification_uri.clone();
-	open_button.on_click(move |_| {
-		Clipboard::get().set_text(&user_code);
-		launch_default_browser(&verification_uri, BrowserLaunchFlags::Default);
-	});
-	let code_row = BoxSizer::builder(Orientation::Horizontal).build();
-	code_row.add(&code_label, 0, SizerFlag::AlignCenterVertical | SizerFlag::Right, padding);
-	code_row.add(&code_field, 1, SizerFlag::Expand, 0);
-	let button_row = BoxSizer::builder(Orientation::Horizontal).build();
-	button_row.add(&open_button, 0, SizerFlag::Right, padding);
-	button_row.add(&cancel_button, 0, SizerFlag::empty(), 0);
 	let content = BoxSizer::builder(Orientation::Vertical).build();
 	content.add(&intro, 0, SizerFlag::All, padding);
-	content.add_sizer(&code_row, 0, SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right, padding);
-	content.add_sizer(&button_row, 0, SizerFlag::AlignRight | SizerFlag::All, padding);
+	let code_field = (!copied).then(|| {
+		let code_label = StaticText::builder(&dialog).with_label("Sign-in &code:").build();
+		let code_field =
+			TextCtrl::builder(&dialog).with_value(&code.user_code).with_style(TextCtrlStyle::ReadOnly).build();
+		let code_row = BoxSizer::builder(Orientation::Horizontal).build();
+		code_row.add(&code_label, 0, SizerFlag::AlignCenterVertical | SizerFlag::Right, padding);
+		code_row.add(&code_field, 1, SizerFlag::Expand, 0);
+		content.add_sizer(&code_row, 0, SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right, padding);
+		code_field
+	});
+	content.add(&cancel_button, 0, SizerFlag::AlignRight | SizerFlag::All, padding);
 	dialog.set_sizer_and_fit(content, true);
 	let token = Rc::new(RefCell::new(None));
 	let closed = Rc::new(Cell::new(false));
@@ -81,7 +83,13 @@ pub fn show_sign_in_dialog(parent: &dyn WxWidget) -> Option<String> {
 		},
 	);
 	dialog.centre();
-	code_field.set_focus();
+	if let Some(code_field) = &code_field {
+		code_field.set_focus();
+		code_field.select_all();
+	} else {
+		cancel_button.set_focus();
+	}
+	launch_default_browser(&verification_uri, BrowserLaunchFlags::Default);
 	dialog.show_modal();
 	closed.set(true);
 	cancel.store(true, Ordering::Relaxed);
