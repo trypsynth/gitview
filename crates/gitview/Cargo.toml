@@ -11,6 +11,7 @@ repository.workspace = true
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
 gitview-core = { path = "../gitview-core" }
 keyring = "4.2.0"
+live-region = "0.3.2"
 wx-utils = "0.3.1"
 wxdragon = { version = "0.9.22", features = ["webview"] }
 

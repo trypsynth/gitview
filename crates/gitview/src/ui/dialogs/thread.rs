@@ -122,6 +122,9 @@ fn show_thread_dialog(parent: &dyn WxWidget, client: Arc<Client>, repo: String, 
 	);
 	let label = StaticText::builder(&dialog).with_label(&format!("&Thread. {summary}")).build();
 	let list = ListBox::builder(&dialog).with_size(THREAD_SIZE).build();
+	// Speaks what copying did. Made after the list, so no screen reader takes it for its label.
+	let live_region = StaticText::builder(&dialog).with_label("").with_size(Size::new(0, 0)).build();
+	live_region.show(false);
 	let posts: Vec<Post> =
 		std::iter::once(Post::of_issue(issue)).chain(comments.iter().map(Post::of_comment)).collect();
 	for post in &posts {
@@ -165,7 +168,7 @@ fn show_thread_dialog(parent: &dyn WxWidget, client: Arc<Client>, repo: String, 
 	list.on_item_double_clicked(move |_| open_on_double_click());
 	let comment_reply = reply.clone();
 	comment_button.on_click(move |_| comment_reply(String::new()));
-	bind_post_menu(list, selected_post, open_post, reply);
+	bind_post_menu(list, live_region, selected_post, open_post, reply);
 	let button_row = BoxSizer::builder(Orientation::Horizontal).build();
 	button_row.add(&open_button, 0, SizerFlag::Right, padding);
 	button_row.add(&comment_button, 0, SizerFlag::empty(), 0);
@@ -190,6 +193,7 @@ fn show_thread_dialog(parent: &dyn WxWidget, client: Arc<Client>, repo: String, 
 /// The context menu on a post, and what its choices do.
 fn bind_post_menu(
 	list: ListBox,
+	live_region: StaticText,
 	selected_post: impl Fn() -> Option<Post> + 'static,
 	open_post: impl Fn() + 'static,
 	reply: impl Fn(String) + 'static,
@@ -215,14 +219,14 @@ fn bind_post_menu(
 		let Some(post) = selected_post() else {
 			return;
 		};
+		let copy = |text: &str, done: &str| {
+			let message = if Clipboard::get().set_text(text) { done } else { "Gitview couldn't copy that." };
+			live_region::announce(live_region, message);
+		};
 		match id {
 			ID_REPLY => reply(post.quote()),
-			ID_COPY_TEXT => {
-				Clipboard::get().set_text(post.text());
-			}
-			ID_COPY_LINK => {
-				Clipboard::get().set_text(&post.url);
-			}
+			ID_COPY_TEXT => copy(post.text(), "Text copied."),
+			ID_COPY_LINK => copy(&post.url, "Link copied."),
 			ID_OPEN_IN_BROWSER => {
 				launch_default_browser(&post.url, BrowserLaunchFlags::Default);
 			}

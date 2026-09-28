@@ -141,6 +141,9 @@ pub struct MainWindow {
 	views: ListBox,
 	items: ListBox,
 	items_label: StaticText,
+	/// A hidden label that speaks through the screen reader, to confirm actions that change
+	/// nothing on screen.
+	live_region: StaticText,
 	poll_timer: Rc<Timer<Frame>>,
 	state: Rc<RefCell<State>>,
 }
@@ -154,13 +157,23 @@ impl MainWindow {
 		let views = ListBox::builder(&panel).build();
 		let items_label = StaticText::builder(&panel).with_label(View::Notifications.title()).build();
 		let items = ListBox::builder(&panel).build();
+		// Made after the lists, so no screen reader takes it for one's label.
+		let live_region = StaticText::builder(&panel).with_label("").with_size(Size::new(0, 0)).build();
+		live_region.show(false);
 		for view in View::ALL {
 			views.append(view.title());
 		}
 		views.set_selection(0, true);
 		lay_out(panel, [(views_label, views), (items_label, items)]);
-		let window =
-			Self { frame, views, items, items_label, poll_timer: Rc::new(Timer::new(&frame)), state: Rc::default() };
+		let window = Self {
+			frame,
+			views,
+			items,
+			items_label,
+			live_region,
+			poll_timer: Rc::new(Timer::new(&frame)),
+			state: Rc::default(),
+		};
 		window.bind_events();
 		window.update_filter_menu();
 		window.update_actions_menu();
@@ -482,13 +495,22 @@ impl MainWindow {
 					return;
 				};
 				let window = self.clone();
-				dialogs::post_comment(self.frame, client, repo, number, "", move |_| window.fetch_all());
+				dialogs::post_comment(self.frame, client, repo, number, "", move |_| {
+					window.announce("Comment posted.");
+					window.fetch_all();
+				});
 			}
 			Action::CloseCompleted | Action::CloseNotPlanned | Action::ClosePullRequest | Action::Reopen => {
 				let Some((repo, number)) = selected.issue() else {
 					return;
 				};
-				self.change(move || match action {
+				let message = match action {
+					Action::CloseCompleted => "Closed as completed.",
+					Action::CloseNotPlanned => "Closed as not planned.",
+					Action::ClosePullRequest => "Pull request closed.",
+					_ => "Reopened.",
+				};
+				self.change(message, move || match action {
 					Action::CloseCompleted => client.close_issue(&repo, number, CloseReason::Completed),
 					Action::CloseNotPlanned => client.close_issue(&repo, number, CloseReason::NotPlanned),
 					Action::ClosePullRequest => client.close_pull_request(&repo, number),
@@ -501,7 +523,12 @@ impl MainWindow {
 					return;
 				};
 				let id = notification.id;
-				self.change(move || match action {
+				let message = match action {
+					Action::MarkRead => "Marked as read.",
+					Action::MarkDone => "Marked as done.",
+					_ => "Unsubscribed.",
+				};
+				self.change(message, move || match action {
 					Action::MarkRead => client.mark_notification_read(&id),
 					Action::MarkDone => client.mark_notification_done(&id),
 					_ => client.unsubscribe(&id),
@@ -519,11 +546,20 @@ impl MainWindow {
 				let Selected::Repository(repository) = selected else {
 					return;
 				};
-				self.change(move || client.set_starred(&repository.full_name, action == Action::Star));
+				let starring = action == Action::Star;
+				let message = if starring { "Starred." } else { "Unstarred." };
+				self.change(message, move || client.set_starred(&repository.full_name, starring));
 			}
-			Action::CopyLink => self.with_link(client, &selected, |url| {
-				Clipboard::get().set_text(url);
-			}),
+			Action::CopyLink => {
+				let window = self.clone();
+				self.with_link(client, &selected, move |url| {
+					if Clipboard::get().set_text(url) {
+						window.announce("Link copied.");
+					} else {
+						show_error(&window.frame, "Gitview couldn't copy the link.", "Could Not Copy");
+					}
+				});
+			}
 			Action::OpenInBrowser => {
 				self.with_link(client, &selected, |url| {
 					launch_default_browser(url, BrowserLaunchFlags::Default);
@@ -547,13 +583,22 @@ impl MainWindow {
 		}
 	}
 
-	/// Makes a change on GitHub, then fetches every view again so the lists show it.
-	fn change(&self, job: impl FnOnce() -> Result<(), Error> + Send + 'static) {
+	/// Makes a change on GitHub, says `message` once it is made, then fetches every view again
+	/// so the lists show it.
+	fn change(&self, message: impl Into<String>, job: impl FnOnce() -> Result<(), Error> + Send + 'static) {
 		let window = self.clone();
+		let message = message.into();
 		worker::spawn(job, move |result| match result {
-			Ok(()) => window.fetch_all(),
+			Ok(()) => {
+				window.announce(&message);
+				window.fetch_all();
+			}
 			Err(error) => show_error(&window.frame, error, "GitHub Did Not Make the Change"),
 		});
+	}
+
+	fn announce(&self, message: &str) {
+		live_region::announce(self.live_region, message);
 	}
 
 	fn close_as_duplicate(&self, client: Arc<Client>, selected: &Selected) {
@@ -571,8 +616,13 @@ impl MainWindow {
 			show_error(&self.frame, format!("\"{}\" doesn't name an issue.", answer.trim()), "Close as Duplicate");
 			return;
 		};
+		let message = if original_repo == repo {
+			format!("Closed as a duplicate of #{original_number}.")
+		} else {
+			format!("Closed as a duplicate of {original_repo}#{original_number}.")
+		};
 		// GitHub takes the original's id rather than its number, so it is looked up first.
-		self.change(move || {
+		self.change(message, move || {
 			let original = client.issue(&original_repo, original_number)?;
 			client.close_issue(&repo, number, CloseReason::Duplicate(original.id))
 		});
