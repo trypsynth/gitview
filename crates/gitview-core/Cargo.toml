@@ -1,0 +1,32 @@
+[package]
+name = "gitview-core"
+description = "GitHub client logic shared by every Gitview frontend"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "gitview_core"
+crate-type = ["cdylib", "rlib", "staticlib"]
+
+[dependencies]
+serde = { version = "1.0.229", features = ["derive"] }
+thiserror = "2.0.20"
+ureq = { version = "3.4.2", features = ["json"] }
+uniffi = { version = "0.32.1", features = ["cli"], optional = true }
+
+[build-dependencies]
+uniffi = { version = "0.32.1", features = ["build"], optional = true }
+
+[features]
+uniffi = ["dep:uniffi"]
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
+required-features = ["uniffi"]
+
+[lints]
+workspace = true

@@ -1,0 +1,20 @@
+[package]
+name = "gitview"
+description = "An accessible, screen reader first GitHub client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+gitview-core = { path = "../gitview-core" }
+keyring = "4.2.0"
+wx-utils = "0.3.1"
+wxdragon = { version = "0.9.22", features = ["webview"] }
+
+[build-dependencies]
+embed-manifest = "1.5.1"
+
+[lints]
+workspace = true
