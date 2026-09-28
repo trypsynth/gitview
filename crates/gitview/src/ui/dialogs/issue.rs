@@ -38,7 +38,7 @@ fn show_issue_dialog(parent: &dyn WxWidget, client: Arc<Client>, repo: String, i
 	let number = issue.number;
 	let dialog = Dialog::builder(parent, &format!("{repo}#{number}: {}", issue.title)).build();
 	let padding = dialog_padding(&dialog);
-	let view = web::build(&dialog);
+	let view = web::build(&dialog, move || dialog.end_modal(ID_CANCEL));
 	view.set_min_size(ISSUE_SIZE);
 	let comments = Rc::new(RefCell::new(comments));
 	render(view, &issue, &comments.borrow());

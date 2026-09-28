@@ -175,7 +175,7 @@ impl MainWindow {
 		let items_label = StaticText::builder(&panel).with_label(View::Notifications.title()).build();
 		let items = ListBox::builder(&panel).build();
 		let content_label = StaticText::builder(&panel).with_label("Content").build();
-		let content = web::build(&panel);
+		let content = web::build(&panel, move || items.set_focus());
 		for view in View::ALL {
 			views.append(view.title());
 		}

@@ -9,14 +9,22 @@ use wxdragon::{
 
 const MESSAGE_HANDLER: &str = "gitview";
 const OPEN_LINK: &str = "open_link:";
+const ESCAPE: &str = "escape";
 // A link inside the pane opens in the real browser: the pane is for reading, and following a
-// link in it would leave the user stranded with no way back.
-const LINK_SCRIPT: &str = "document.addEventListener('click', function(event) { \
+// link in it would leave the user stranded with no way back. The browser keeps key presses to
+// itself, so Escape is passed back from the page for the owner to move focus out.
+const PAGE_SCRIPT: &str = "document.addEventListener('click', function(event) { \
 	var target = event.target; \
 	while (target && target.tagName !== 'A') { target = target.parentNode; } \
 	if (target && target.href) { \
 		event.preventDefault(); \
 		window.gitview.postMessage('open_link:' + target.href); \
+	} \
+}); \
+document.addEventListener('keydown', function(event) { \
+	if (event.key === 'Escape') { \
+		event.preventDefault(); \
+		window.gitview.postMessage('escape'); \
 	} \
 });";
 const STYLE: &str = "body { color-scheme: light dark; font-family: sans-serif; margin: 0; padding: 8px; } \
@@ -26,17 +34,23 @@ const STYLE: &str = "body { color-scheme: light dark; font-family: sans-serif; m
 	img { max-width: 100%; height: auto; } \
 	pre { overflow-x: auto; }";
 
-pub fn build(parent: &dyn WxWidget) -> WebView {
+/// `on_escape` runs when Escape is pressed inside the page.
+pub fn build(parent: &dyn WxWidget, on_escape: impl Fn() + 'static) -> WebView {
 	let view = WebView::builder(parent).build();
 	view.add_script_message_handler(MESSAGE_HANDLER);
 	view.on_script_message_received(move |event: WebViewEventData| {
-		if let Some(url) = event.get_string().as_deref().and_then(|message| message.strip_prefix(OPEN_LINK)) {
+		let Some(message) = event.get_string() else {
+			return;
+		};
+		if message == ESCAPE {
+			on_escape();
+		} else if let Some(url) = message.strip_prefix(OPEN_LINK) {
 			launch_default_browser(url, BrowserLaunchFlags::Default);
 		}
 	});
 	let view_for_load = view;
 	view.on_loaded(move |_| {
-		view_for_load.run_script(LINK_SCRIPT);
+		view_for_load.run_script(PAGE_SCRIPT);
 	});
 	view
 }
