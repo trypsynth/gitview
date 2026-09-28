@@ -3,7 +3,10 @@ use ureq::RequestBuilder;
 
 use crate::{
 	Error,
-	models::{Comment, Issue, IssueState, Notification, Repository, SubjectDetails, User},
+	models::{
+		Comment, Email, Issue, IssueState, Notification, Profile, ProfileUpdate, Repository, SocialAccount,
+		SubjectDetails, User,
+	},
 };
 
 const API_URL: &str = "https://api.github.com";
@@ -16,6 +19,11 @@ const USER_AGENT: &str = concat!("gitview/", env!("CARGO_PKG_VERSION"));
 #[derive(Serialize)]
 struct NewComment<'a> {
 	body: &'a str,
+}
+
+#[derive(Serialize)]
+struct SocialAccountUrls<'a> {
+	account_urls: &'a [String],
 }
 
 #[derive(Deserialize)]
@@ -37,6 +45,50 @@ impl Client {
 
 	pub fn current_user(&self) -> Result<User, Error> {
 		self.get("/user")
+	}
+
+	/// The signed-in user's profile. Fails with [`Error::NeedsProfileAccess`] when the sign-in
+	/// predates Gitview asking for the `user` scope, since saving would fail anyway.
+	pub fn profile(&self) -> Result<Profile, Error> {
+		let mut response = self
+			.authorize(self.agent.get(format!("{API_URL}/user")))
+			.header("Accept", "application/vnd.github+json")
+			.call()?;
+		let has_user_scope = response
+			.headers()
+			.get("X-OAuth-Scopes")
+			.and_then(|scopes| scopes.to_str().ok())
+			.is_some_and(|scopes| scopes.split(',').any(|scope| scope.trim() == "user"));
+		if !has_user_scope {
+			return Err(Error::NeedsProfileAccess);
+		}
+		Ok(response.body_mut().read_json()?)
+	}
+
+	pub fn update_profile(&self, update: &ProfileUpdate) -> Result<Profile, Error> {
+		Ok(self.authorize(self.agent.patch(format!("{API_URL}/user"))).send_json(update)?.body_mut().read_json()?)
+	}
+
+	/// Every address on the account, including the ones that are not verified.
+	pub fn emails(&self) -> Result<Vec<Email>, Error> {
+		self.get("/user/emails?per_page=100")
+	}
+
+	pub fn social_accounts(&self) -> Result<Vec<SocialAccount>, Error> {
+		self.get("/user/social_accounts?per_page=100")
+	}
+
+	pub fn add_social_accounts(&self, urls: &[String]) -> Result<(), Error> {
+		self.authorize(self.agent.post(format!("{API_URL}/user/social_accounts")))
+			.send_json(SocialAccountUrls { account_urls: urls })?;
+		Ok(())
+	}
+
+	pub fn remove_social_accounts(&self, urls: &[String]) -> Result<(), Error> {
+		self.authorize(self.agent.delete(format!("{API_URL}/user/social_accounts")))
+			.force_send_body()
+			.send_json(SocialAccountUrls { account_urls: urls })?;
+		Ok(())
 	}
 
 	/// Unread notifications, or every notification when `all` is set.

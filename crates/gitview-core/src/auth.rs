@@ -9,7 +9,8 @@ use serde::Deserialize;
 use crate::Error;
 
 pub const CLIENT_ID: &str = "Ov23liiwcN8PgLP9oscM";
-const SCOPES: &str = "repo notifications read:org";
+// `user` covers editing the profile, including its email addresses and social accounts.
+const SCOPES: &str = "repo notifications read:org user";
 const DEVICE_CODE_URL: &str = "https://github.com/login/device/code";
 const ACCESS_TOKEN_URL: &str = "https://github.com/login/oauth/access_token";
 const DEVICE_GRANT_TYPE: &str = "urn:ietf:params:oauth:grant-type:device_code";

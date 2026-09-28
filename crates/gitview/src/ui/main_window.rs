@@ -17,6 +17,7 @@ use crate::token;
 const ID_OPEN: i32 = ID_HIGHEST + 1;
 const ID_REFRESH: i32 = ID_HIGHEST + 2;
 const ID_SIGN_OUT: i32 = ID_HIGHEST + 3;
+const ID_PROFILE: i32 = ID_HIGHEST + 4;
 const ID_FILTER_FIRST: i32 = ID_HIGHEST + 10;
 const FILTER_MENU: usize = 1;
 const WINDOW_SIZE: Size = Size { width: 800, height: 600 };
@@ -207,6 +208,7 @@ impl MainWindow {
 		self.frame.on_menu_selected(move |event| match event.get_id() {
 			ID_OPEN => window.open_selected(),
 			ID_REFRESH => window.fetch_all(),
+			ID_PROFILE => window.edit_profile(),
 			ID_SIGN_OUT => window.sign_out(),
 			ID_EXIT => window.frame.close(false),
 			id if (ID_FILTER_FIRST..ID_FILTER_FIRST + 3).contains(&id) => window.set_filter(id - ID_FILTER_FIRST),
@@ -249,14 +251,43 @@ impl MainWindow {
 			self.frame.close(true);
 			return;
 		};
-		if let Err(error) = token::save(&token) {
+		self.save_token(&token);
+		self.connect(token);
+	}
+
+	fn save_token(&self, token: &str) {
+		if let Err(error) = token::save(token) {
 			show_warning(
 				&self.frame,
 				format!("Gitview could not save your sign-in, so you will need to sign in again next time. {error}"),
 				"Sign-In Not Saved",
 			);
 		}
-		self.connect(token);
+	}
+
+	fn edit_profile(&self) {
+		let Some(client) = self.state.borrow().client.clone() else {
+			return;
+		};
+		let window = self.clone();
+		dialogs::edit_profile(self.frame, client, move || window.reauthorize());
+	}
+
+	/// Signs in again to pick up scopes added since the saved sign-in, then goes back to the
+	/// profile. Cancelling keeps the old sign-in, which still works for everything else.
+	fn reauthorize(&self) {
+		if self.state.borrow().signing_in {
+			return;
+		}
+		self.state.borrow_mut().signing_in = true;
+		let token = dialogs::show_sign_in_dialog(&self.frame);
+		self.state.borrow_mut().signing_in = false;
+		let Some(token) = token else {
+			return;
+		};
+		self.save_token(&token);
+		self.state.borrow_mut().client = Some(Arc::new(Client::new(token)));
+		self.edit_profile();
 	}
 
 	fn sign_out(&self) {
@@ -592,6 +623,7 @@ fn build_menu_bar(frame: &Frame) -> MenuItem {
 	let open_item = file_menu.append(ID_OPEN, "&Open\tEnter", "Open the selected item", ItemKind::Normal);
 	file_menu.append(ID_REFRESH, "&Refresh\tF5", "Reload the selected view", ItemKind::Normal);
 	file_menu.append_separator();
+	file_menu.append(ID_PROFILE, "Edit &Profile...", "Change your public GitHub profile", ItemKind::Normal);
 	file_menu.append(ID_SIGN_OUT, "Sign O&ut", "Forget your GitHub sign-in", ItemKind::Normal);
 	file_menu.append(ID_EXIT, "E&xit", "Close Gitview", ItemKind::Normal);
 	let filter_menu = Menu::builder().build();

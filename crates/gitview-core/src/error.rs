@@ -6,6 +6,8 @@ pub enum Error {
 	CodeExpired,
 	#[error("sign-in was denied on GitHub")]
 	AccessDenied,
+	#[error("the sign-in does not allow editing your profile")]
+	NeedsProfileAccess,
 	#[error("sign-in was cancelled")]
 	Cancelled,
 	#[error("that link does not point at the GitHub API")]

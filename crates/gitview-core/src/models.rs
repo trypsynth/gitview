@@ -1,9 +1,49 @@
-use serde::{Deserialize, de::IgnoredAny};
+use serde::{Deserialize, Serialize, de::IgnoredAny};
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct User {
 	pub login: String,
 	pub name: Option<String>,
+}
+
+/// The signed-in user's public profile, as the profile settings page shows it.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Profile {
+	pub login: String,
+	pub name: Option<String>,
+	/// The address shown on the profile, if any.
+	pub email: Option<String>,
+	pub bio: Option<String>,
+	/// The website link; GitHub calls it the blog.
+	pub blog: Option<String>,
+	pub company: Option<String>,
+	pub location: Option<String>,
+	pub hireable: Option<bool>,
+}
+
+/// The fields of a profile edit. GitHub treats an empty string as clearing a field.
+#[derive(Debug, Clone, Serialize)]
+pub struct ProfileUpdate {
+	pub name: String,
+	/// Left out when unchanged: GitHub rejects a public address that is not verified.
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub email: Option<String>,
+	pub bio: String,
+	pub blog: String,
+	pub company: String,
+	pub location: String,
+	pub hireable: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct Email {
+	pub email: String,
+	pub verified: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct SocialAccount {
+	pub url: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
