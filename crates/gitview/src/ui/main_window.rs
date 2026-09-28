@@ -1,4 +1,9 @@
-use std::{cell::RefCell, rc::Rc, sync::Arc};
+use std::{
+	cell::RefCell,
+	rc::Rc,
+	sync::Arc,
+	time::{Duration, Instant},
+};
 
 use gitview_core::{
 	Client, Error,
@@ -31,6 +36,8 @@ const LOADING: &str = "Loading...";
 /// How often the view on screen is fetched again. GitHub asks clients not to poll the
 /// notifications endpoint more than once a minute.
 const POLL_INTERVAL_MS: i32 = 60_000;
+/// How long a close or reopen is laid over search results, which usually catch up in seconds.
+const SEARCH_CATCH_UP: Duration = Duration::from_secs(120);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum View {
@@ -119,6 +126,37 @@ struct State {
 	/// Set while the sign-in dialog is up, so the five views in flight cannot each raise
 	/// one of their own when the token turns out to be dead.
 	signing_in: bool,
+	/// Issues closed or reopened lately, laid over what the search-backed views fetch.
+	issue_changes: Vec<IssueChange>,
+}
+
+/// An issue Gitview closed or reopened. Assigned and Review requested come from GitHub's search,
+/// which takes a while to catch up, so for a time they are corrected by hand.
+struct IssueChange {
+	repo: String,
+	number: u64,
+	open: bool,
+	made: Instant,
+}
+
+impl IssueChange {
+	/// Brings `issues` up to date with `changes`, dropping any that no longer match `filter`.
+	fn apply(changes: &[Self], issues: &mut Vec<Issue>, filter: IssueState) {
+		for change in changes {
+			let state = if change.open { "open" } else { "closed" };
+			let matching = issues
+				.iter_mut()
+				.filter(|issue| issue.number == change.number && issue.repository() == Some(change.repo.as_str()));
+			for issue in matching {
+				state.clone_into(&mut issue.state);
+			}
+		}
+		issues.retain(|issue| match filter {
+			IssueState::Open => issue.is_open(),
+			IssueState::Closed => !issue.is_open(),
+			IssueState::All => true,
+		});
+	}
 }
 
 impl Default for State {
@@ -131,6 +169,7 @@ impl Default for State {
 			unread_only: true,
 			issue_filter: IssueState::Open,
 			signing_in: false,
+			issue_changes: Vec::new(),
 		}
 	}
 }
@@ -395,7 +434,7 @@ impl MainWindow {
 	}
 
 	fn store(&self, view: View, result: Result<Items, Error>) {
-		let items = match result {
+		let mut items = match result {
 			Ok(items) => items,
 			Err(Error::Unauthorized) => {
 				token::delete();
@@ -415,6 +454,11 @@ impl MainWindow {
 				return;
 			}
 		};
+		if let Items::Issues(issues) = &mut items {
+			let mut state = self.state.borrow_mut();
+			state.issue_changes.retain(|change| change.made.elapsed() < SEARCH_CATCH_UP);
+			IssueChange::apply(&state.issue_changes, issues, state.issue_filter);
+		}
 		let labels = items.labels();
 		let (current_view, unchanged, selection) = {
 			let mut state = self.state.borrow_mut();
@@ -510,7 +554,9 @@ impl MainWindow {
 					Action::ClosePullRequest => "Pull request closed.",
 					_ => "Reopened.",
 				};
-				self.change(message, move || match action {
+				let change =
+					IssueChange { repo: repo.clone(), number, open: action == Action::Reopen, made: Instant::now() };
+				self.change(message, Some(change), move || match action {
 					Action::CloseCompleted => client.close_issue(&repo, number, CloseReason::Completed),
 					Action::CloseNotPlanned => client.close_issue(&repo, number, CloseReason::NotPlanned),
 					Action::ClosePullRequest => client.close_pull_request(&repo, number),
@@ -528,7 +574,7 @@ impl MainWindow {
 					Action::MarkDone => "Marked as done.",
 					_ => "Unsubscribed.",
 				};
-				self.change(message, move || match action {
+				self.change(message, None, move || match action {
 					Action::MarkRead => client.mark_notification_read(&id),
 					Action::MarkDone => client.mark_notification_done(&id),
 					_ => client.unsubscribe(&id),
@@ -548,7 +594,7 @@ impl MainWindow {
 				};
 				let starring = action == Action::Star;
 				let message = if starring { "Starred." } else { "Unstarred." };
-				self.change(message, move || client.set_starred(&repository.full_name, starring));
+				self.change(message, None, move || client.set_starred(&repository.full_name, starring));
 			}
 			Action::CopyLink => {
 				let window = self.clone();
@@ -584,17 +630,51 @@ impl MainWindow {
 	}
 
 	/// Makes a change on GitHub, says `message` once it is made, then fetches every view again
-	/// so the lists show it.
-	fn change(&self, message: impl Into<String>, job: impl FnOnce() -> Result<(), Error> + Send + 'static) {
+	/// so the lists show it. `issue_change` is set when the change closes or reopens an issue.
+	fn change(
+		&self,
+		message: impl Into<String>,
+		issue_change: Option<IssueChange>,
+		job: impl FnOnce() -> Result<(), Error> + Send + 'static,
+	) {
 		let window = self.clone();
 		let message = message.into();
 		worker::spawn(job, move |result| match result {
 			Ok(()) => {
 				window.announce(&message);
+				if let Some(change) = issue_change {
+					window.state.borrow_mut().issue_changes.push(change);
+					// Search would bring the old state straight back, so the lists are fixed
+					// here rather than waiting on the fetch.
+					for view in [View::Assigned, View::ReviewRequested] {
+						window.apply_issue_changes(view);
+					}
+				}
 				window.fetch_all();
 			}
 			Err(error) => show_error(&window.frame, error, "GitHub Did Not Make the Change"),
 		});
+	}
+
+	fn apply_issue_changes(&self, view: View) {
+		let labels = {
+			let mut state = self.state.borrow_mut();
+			let State { loaded, issue_changes, issue_filter, view: current, .. } = &mut *state;
+			let Some(loaded) = loaded[view.index()].as_mut() else {
+				return;
+			};
+			let Items::Issues(issues) = &mut loaded.items else {
+				return;
+			};
+			IssueChange::apply(issue_changes, issues, *issue_filter);
+			loaded.labels = loaded.items.labels();
+			if *current != view {
+				return;
+			}
+			loaded.labels.clone()
+		};
+		let selection = self.items.get_selection().unwrap_or(0);
+		self.fill(view, &labels, selection);
 	}
 
 	fn announce(&self, message: &str) {
@@ -621,8 +701,9 @@ impl MainWindow {
 		} else {
 			format!("Closed as a duplicate of {original_repo}#{original_number}.")
 		};
+		let change = IssueChange { repo: repo.clone(), number, open: false, made: Instant::now() };
 		// GitHub takes the original's id rather than its number, so it is looked up first.
-		self.change(message, move || {
+		self.change(message, Some(change), move || {
 			let original = client.issue(&original_repo, original_number)?;
 			client.close_issue(&repo, number, CloseReason::Duplicate(original.id))
 		});
