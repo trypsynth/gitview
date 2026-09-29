@@ -52,12 +52,14 @@ pub enum Action {
 	PullRequests,
 	Star,
 	Unstar,
+	Watch,
+	Unwatch,
 	CopyLink,
 	OpenInBrowser,
 }
 
 impl Action {
-	const ALL: [Self; 16] = [
+	const ALL: [Self; 18] = [
 		Self::Open,
 		Self::Comment,
 		Self::CloseCompleted,
@@ -72,6 +74,8 @@ impl Action {
 		Self::PullRequests,
 		Self::Star,
 		Self::Unstar,
+		Self::Watch,
+		Self::Unwatch,
 		Self::CopyLink,
 		Self::OpenInBrowser,
 	];
@@ -100,6 +104,8 @@ impl Action {
 			Self::PullRequests => "&Pull requests",
 			Self::Star => "S&tar",
 			Self::Unstar => "Uns&tar",
+			Self::Watch => "&Watch",
+			Self::Unwatch => "Un&watch",
 			Self::CopyLink => "Copy &link\tCtrl+Shift+C",
 			Self::OpenInBrowser => "Open in &browser\tCtrl+B",
 		}
@@ -121,6 +127,8 @@ impl Action {
 			Self::PullRequests => "List the repository's pull requests",
 			Self::Star => "Star the repository",
 			Self::Unstar => "Remove your star",
+			Self::Watch => "Get notified of all activity in the repository",
+			Self::Unwatch => "Stop watching the repository",
 			Self::CopyLink => "Copy the link to the item",
 			Self::OpenInBrowser => "Show the item on GitHub",
 		}
@@ -133,15 +141,23 @@ enum Entry {
 	Separator,
 }
 
-/// The actions `selected` offers. `starred` says whether a repository is starred.
-fn entries(selected: &Selected, starred: bool) -> Vec<Entry> {
+/// Whether a repository is starred and watched, which decides which way its toggles go.
+#[derive(Clone, Copy, Default)]
+pub struct Marks {
+	pub starred: bool,
+	pub watching: bool,
+}
+
+/// The actions `selected` offers.
+fn entries(selected: &Selected, marks: Marks) -> Vec<Entry> {
 	let mut entries = vec![Entry::Action(Action::Open)];
 	if let Selected::Repository(_) = selected {
 		entries.extend([
 			Entry::Action(Action::Issues),
 			Entry::Action(Action::PullRequests),
 			Entry::Separator,
-			Entry::Action(if starred { Action::Unstar } else { Action::Star }),
+			Entry::Action(if marks.starred { Action::Unstar } else { Action::Star }),
+			Entry::Action(if marks.watching { Action::Unwatch } else { Action::Watch }),
 		]);
 	}
 	if selected.issue().is_some() {
@@ -170,14 +186,14 @@ fn entries(selected: &Selected, starred: bool) -> Vec<Entry> {
 }
 
 /// A menu of what `selected` offers, or a single disabled line when nothing is selected.
-pub fn menu(selected: Option<&Selected>, starred: bool) -> Menu {
+pub fn menu(selected: Option<&Selected>, marks: Marks) -> Menu {
 	let menu = Menu::builder().build();
 	let Some(selected) = selected else {
 		menu.append(ID_NOTHING, "No item selected", "", ItemKind::Normal);
 		menu.enable_item(ID_NOTHING, false);
 		return menu;
 	};
-	for entry in entries(selected, starred) {
+	for entry in entries(selected, marks) {
 		match entry {
 			Entry::Action(action) => append(&menu, action),
 			Entry::Submenu(label, actions) => {

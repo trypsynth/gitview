@@ -18,7 +18,7 @@ use wxdragon::{
 };
 
 use super::{
-	actions::{self, Action, Selected},
+	actions::{self, Action, Marks, Selected},
 	dialogs::{self, Listing},
 	text::comment_count,
 	worker,
@@ -44,13 +44,14 @@ enum View {
 	Notifications,
 	Repositories,
 	Starred,
+	Watched,
 	Assigned,
 	ReviewRequested,
 }
 
 impl View {
-	const ALL: [Self; 5] =
-		[Self::Notifications, Self::Repositories, Self::Starred, Self::Assigned, Self::ReviewRequested];
+	const ALL: [Self; 6] =
+		[Self::Notifications, Self::Repositories, Self::Starred, Self::Watched, Self::Assigned, Self::ReviewRequested];
 	const COUNT: usize = Self::ALL.len();
 
 	const fn index(self) -> usize {
@@ -58,8 +59,9 @@ impl View {
 			Self::Notifications => 0,
 			Self::Repositories => 1,
 			Self::Starred => 2,
-			Self::Assigned => 3,
-			Self::ReviewRequested => 4,
+			Self::Watched => 3,
+			Self::Assigned => 4,
+			Self::ReviewRequested => 5,
 		}
 	}
 
@@ -68,6 +70,7 @@ impl View {
 			Self::Notifications => "Notifications",
 			Self::Repositories => "Repositories",
 			Self::Starred => "Starred",
+			Self::Watched => "Watching",
 			Self::Assigned => "Assigned to me",
 			Self::ReviewRequested => "Review requested",
 		}
@@ -77,7 +80,7 @@ impl View {
 	const fn filters(self) -> &'static [&'static str] {
 		match self {
 			Self::Notifications => &["&Unread", "&All"],
-			Self::Repositories | Self::Starred => &[],
+			Self::Repositories | Self::Starred | Self::Watched => &[],
 			Self::Assigned | Self::ReviewRequested => &["&Open", "&Closed", "&All"],
 		}
 	}
@@ -87,6 +90,7 @@ impl View {
 			Self::Notifications => "No notifications.",
 			Self::Repositories => "No repositories.",
 			Self::Starred => "No starred repositories.",
+			Self::Watched => "You aren't watching any repositories.",
 			Self::Assigned => "Nothing assigned to you.",
 			Self::ReviewRequested => "No reviews requested from you.",
 		}
@@ -357,7 +361,7 @@ impl MainWindow {
 			let view = state.view;
 			match view {
 				View::Notifications => state.unread_only = index == 0,
-				View::Repositories | View::Starred => return,
+				View::Repositories | View::Starred | View::Watched => return,
 				View::Assigned | View::ReviewRequested => {
 					state.issue_filter = match index {
 						0 => IssueState::Open,
@@ -426,6 +430,7 @@ impl MainWindow {
 				View::Notifications => client.notifications(!unread_only).map(Items::Notifications),
 				View::Repositories => client.repositories().map(Items::Repositories),
 				View::Starred => client.starred().map(Items::Repositories),
+				View::Watched => client.watched().map(Items::Repositories),
 				View::Assigned => client.assigned(issue_filter).map(Items::Issues),
 				View::ReviewRequested => client.review_requests(issue_filter).map(Items::Issues),
 			},
@@ -497,16 +502,20 @@ impl MainWindow {
 		})
 	}
 
-	/// Whether `selected` is a repository in the Starred view's list.
-	fn is_starred(&self, selected: &Selected) -> bool {
+	/// Whether `selected` is a repository in the Starred and Watching views' lists.
+	fn marks(&self, selected: &Selected) -> Marks {
 		let Selected::Repository(repository) = selected else {
-			return false;
+			return Marks::default();
 		};
 		let state = self.state.borrow();
-		matches!(
-			state.loaded[View::Starred.index()].as_ref().map(|loaded| &loaded.items),
-			Some(Items::Repositories(starred)) if starred.iter().any(|star| star.full_name == repository.full_name)
-		)
+		let listed = |view: View| {
+			matches!(
+				state.loaded[view.index()].as_ref().map(|loaded| &loaded.items),
+				Some(Items::Repositories(repositories))
+					if repositories.iter().any(|listed| listed.full_name == repository.full_name)
+			)
+		};
+		Marks { starred: listed(View::Starred), watching: listed(View::Watched) }
 	}
 
 	/// Rebuilds the Actions menu for the selected item, so its shortcuts act on that item.
@@ -515,15 +524,15 @@ impl MainWindow {
 			return;
 		};
 		let selected = self.selected();
-		let starred = selected.as_ref().is_some_and(|selected| self.is_starred(selected));
-		menu_bar.replace(ACTIONS_MENU, actions::menu(selected.as_ref(), starred), "&Actions");
+		let marks = selected.as_ref().map(|selected| self.marks(selected)).unwrap_or_default();
+		menu_bar.replace(ACTIONS_MENU, actions::menu(selected.as_ref(), marks), "&Actions");
 	}
 
 	fn show_context_menu(&self) {
 		let Some(selected) = self.selected() else {
 			return;
 		};
-		let mut menu = actions::menu(Some(&selected), self.is_starred(&selected));
+		let mut menu = actions::menu(Some(&selected), self.marks(&selected));
 		self.items.popup_menu(&mut menu, None);
 		menu.destroy_menu();
 	}
@@ -595,6 +604,14 @@ impl MainWindow {
 				let starring = action == Action::Star;
 				let message = if starring { "Starred." } else { "Unstarred." };
 				self.change(message, None, move || client.set_starred(&repository.full_name, starring));
+			}
+			Action::Watch | Action::Unwatch => {
+				let Selected::Repository(repository) = selected else {
+					return;
+				};
+				let watching = action == Action::Watch;
+				let message = if watching { "Watching." } else { "No longer watching." };
+				self.change(message, None, move || client.set_watching(&repository.full_name, watching));
 			}
 			Action::CopyLink => {
 				let window = self.clone();

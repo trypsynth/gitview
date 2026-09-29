@@ -31,6 +31,11 @@ struct StateChange {
 }
 
 #[derive(Serialize)]
+struct Subscription {
+	subscribed: bool,
+}
+
+#[derive(Serialize)]
 struct SocialAccountUrls<'a> {
 	account_urls: &'a [String],
 }
@@ -130,6 +135,18 @@ impl Client {
 		Ok(())
 	}
 
+	/// Watches `repo` (`owner/name`) for all activity, or stops watching it when `watching` is
+	/// false.
+	pub fn set_watching(&self, repo: &str, watching: bool) -> Result<(), Error> {
+		let url = format!("{API_URL}/repos/{repo}/subscription");
+		if watching {
+			self.authorize(self.agent.put(url)).send_json(Subscription { subscribed: true })?;
+		} else {
+			self.authorize(self.agent.delete(url)).call()?;
+		}
+		Ok(())
+	}
+
 	/// Stars `repo` (`owner/name`), or unstars it when `starred` is false.
 	pub fn set_starred(&self, repo: &str, starred: bool) -> Result<(), Error> {
 		let url = format!("{API_URL}/user/starred/{repo}");
@@ -147,6 +164,11 @@ impl Client {
 
 	pub fn starred(&self) -> Result<Vec<Repository>, Error> {
 		self.get("/user/starred?per_page=100")
+	}
+
+	/// Repositories the signed-in user watches, which GitHub calls subscriptions.
+	pub fn watched(&self) -> Result<Vec<Repository>, Error> {
+		self.get("/user/subscriptions?per_page=100")
 	}
 
 	/// Issues and pull requests in `repo` (`owner/name`), newest first.
