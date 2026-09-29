@@ -2,6 +2,7 @@ mod actions;
 mod dialogs;
 mod main_window;
 mod text;
+mod view;
 mod web;
 mod worker;
 

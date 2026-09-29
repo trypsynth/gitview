@@ -21,13 +21,15 @@ use super::{
 	actions::{self, Action, Marks, Selected},
 	dialogs::{self, Listing},
 	text::comment_count,
+	view::{self, View},
 	worker,
 };
-use crate::token;
+use crate::{config, token};
 
 const ID_REFRESH: i32 = ID_HIGHEST + 2;
 const ID_SIGN_OUT: i32 = ID_HIGHEST + 3;
 const ID_PROFILE: i32 = ID_HIGHEST + 4;
+const ID_SETTINGS: i32 = ID_HIGHEST + 5;
 const ID_FILTER_FIRST: i32 = ID_HIGHEST + 10;
 const ACTIONS_MENU: usize = 1;
 const FILTER_MENU: usize = 2;
@@ -38,64 +40,6 @@ const LOADING: &str = "Loading...";
 const POLL_INTERVAL_MS: i32 = 60_000;
 /// How long a close or reopen is laid over search results, which usually catch up in seconds.
 const SEARCH_CATCH_UP: Duration = Duration::from_secs(120);
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum View {
-	Notifications,
-	Repositories,
-	Starred,
-	Watched,
-	Assigned,
-	ReviewRequested,
-}
-
-impl View {
-	const ALL: [Self; 6] =
-		[Self::Notifications, Self::Repositories, Self::Starred, Self::Watched, Self::Assigned, Self::ReviewRequested];
-	const COUNT: usize = Self::ALL.len();
-
-	const fn index(self) -> usize {
-		match self {
-			Self::Notifications => 0,
-			Self::Repositories => 1,
-			Self::Starred => 2,
-			Self::Watched => 3,
-			Self::Assigned => 4,
-			Self::ReviewRequested => 5,
-		}
-	}
-
-	const fn title(self) -> &'static str {
-		match self {
-			Self::Notifications => "Notifications",
-			Self::Repositories => "Repositories",
-			Self::Starred => "Starred",
-			Self::Watched => "Watching",
-			Self::Assigned => "Assigned to me",
-			Self::ReviewRequested => "Review requested",
-		}
-	}
-
-	/// The filters this view offers, in menu order. Repository lists have none.
-	const fn filters(self) -> &'static [&'static str] {
-		match self {
-			Self::Notifications => &["&Unread", "&All"],
-			Self::Repositories | Self::Starred | Self::Watched => &[],
-			Self::Assigned | Self::ReviewRequested => &["&Open", "&Closed", "&All"],
-		}
-	}
-
-	const fn empty_message(self) -> &'static str {
-		match self {
-			Self::Notifications => "No notifications.",
-			Self::Repositories => "No repositories.",
-			Self::Starred => "No starred repositories.",
-			Self::Watched => "You aren't watching any repositories.",
-			Self::Assigned => "Nothing assigned to you.",
-			Self::ReviewRequested => "No reviews requested from you.",
-		}
-	}
-}
 
 enum Items {
 	Notifications(Vec<Notification>),
@@ -122,6 +66,8 @@ struct Loaded {
 
 struct State {
 	client: Option<Arc<Client>>,
+	/// Every view in the order chosen in Settings, with whether the Views list shows it.
+	arrangement: Vec<(View, bool)>,
 	view: View,
 	loaded: [Option<Loaded>; View::COUNT],
 	selections: [u32; View::COUNT],
@@ -167,6 +113,7 @@ impl Default for State {
 	fn default() -> Self {
 		Self {
 			client: None,
+			arrangement: view::arrange(&[], &[]),
 			view: View::Notifications,
 			loaded: [const { None }; View::COUNT],
 			selections: [0; View::COUNT],
@@ -198,16 +145,16 @@ impl MainWindow {
 		let panel = Panel::builder(&frame).build();
 		let views_label = StaticText::builder(&panel).with_label("Views").build();
 		let views = ListBox::builder(&panel).build();
-		let items_label = StaticText::builder(&panel).with_label(View::Notifications.title()).build();
+		let settings = config::load().views;
+		let arrangement = view::arrange(&settings.order, &settings.hidden);
+		let first = shown(&arrangement)[0];
+		let items_label = StaticText::builder(&panel).with_label(first.title()).build();
 		let items = ListBox::builder(&panel).build();
 		// Made after the lists, so no screen reader takes it for one's label.
 		let live_region = StaticText::builder(&panel).with_label("").with_size(Size::new(0, 0)).build();
 		live_region.show(false);
-		for view in View::ALL {
-			views.append(view.title());
-		}
-		views.set_selection(0, true);
 		lay_out(panel, [(views_label, views), (items_label, items)]);
+		let state = State { arrangement, view: first, ..State::default() };
 		let window = Self {
 			frame,
 			views,
@@ -215,8 +162,9 @@ impl MainWindow {
 			items_label,
 			live_region,
 			poll_timer: Rc::new(Timer::new(&frame)),
-			state: Rc::default(),
+			state: Rc::new(RefCell::new(state)),
 		};
+		window.fill_views();
 		window.bind_events();
 		window.update_filter_menu();
 		window.update_actions_menu();
@@ -233,6 +181,7 @@ impl MainWindow {
 		self.frame.on_menu_selected(move |event| match event.get_id() {
 			ID_REFRESH => window.fetch_all(),
 			ID_PROFILE => window.edit_profile(),
+			ID_SETTINGS => window.open_settings(),
 			ID_SIGN_OUT => window.sign_out(),
 			ID_EXIT => window.frame.close(false),
 			id if (ID_FILTER_FIRST..ID_FILTER_FIRST + 3).contains(&id) => window.set_filter(id - ID_FILTER_FIRST),
@@ -244,10 +193,10 @@ impl MainWindow {
 		});
 		let window = self.clone();
 		self.views.on_selection_changed(move |event| {
-			let view = event
-				.get_selection()
-				.and_then(|index| usize::try_from(index).ok())
-				.and_then(|index| View::ALL.get(index).copied());
+			let view = event.get_selection().and_then(|index| usize::try_from(index).ok()).and_then(|index| {
+				let state = window.state.borrow();
+				shown(&state.arrangement).get(index).copied()
+			});
 			if let Some(view) = view {
 				window.show_view(view);
 			}
@@ -322,9 +271,53 @@ impl MainWindow {
 	fn sign_out(&self) {
 		self.poll_timer.stop();
 		token::delete();
-		*self.state.borrow_mut() = State::default();
+		{
+			// What belongs to the account goes; how the window is laid out stays.
+			let mut state = self.state.borrow_mut();
+			let arrangement = std::mem::take(&mut state.arrangement);
+			*state = State { arrangement, view: state.view, ..State::default() };
+		}
 		self.items.clear();
 		self.sign_in();
+	}
+
+	fn open_settings(&self) {
+		let arrangement = self.state.borrow().arrangement.clone();
+		let Some(arrangement) = dialogs::show_settings_dialog(&self.frame, &arrangement) else {
+			return;
+		};
+		let mut config = config::load();
+		config.views = config::Views {
+			order: arrangement.iter().map(|(view, _)| view.id().to_owned()).collect(),
+			hidden: arrangement.iter().filter(|(_, shown)| !shown).map(|(view, _)| view.id().to_owned()).collect(),
+		};
+		if let Err(error) = config::save(&config) {
+			show_warning(
+				&self.frame,
+				format!("Gitview could not save your settings, so they will only last until it closes. {error}"),
+				"Settings Not Saved",
+			);
+		}
+		self.state.borrow_mut().arrangement = arrangement;
+		self.fill_views();
+	}
+
+	/// Lists the shown views in their chosen order. The view on screen stays when it is still
+	/// shown; otherwise the first shown view takes its place.
+	fn fill_views(&self) {
+		let (shown, current) = {
+			let state = self.state.borrow();
+			(shown(&state.arrangement), state.view)
+		};
+		self.views.clear();
+		for view in &shown {
+			self.views.append(view.title());
+		}
+		let index = shown.iter().position(|view| *view == current).unwrap_or(0);
+		self.views.set_selection(u32::try_from(index).unwrap_or_default(), true);
+		if shown[index] != current {
+			self.show_view(shown[index]);
+		}
 	}
 
 	/// Shows a view the user just moved to: its items appear from memory, and a fetch runs
@@ -779,12 +772,20 @@ impl MainWindow {
 	}
 }
 
+/// The views the Views list shows, in order. Never empty: were every view hidden, as a hand-edited
+/// config file could have it, all of them are shown instead.
+fn shown(arrangement: &[(View, bool)]) -> Vec<View> {
+	let shown: Vec<View> = arrangement.iter().filter(|(_, shown)| *shown).map(|(view, _)| *view).collect();
+	if shown.is_empty() { arrangement.iter().map(|(view, _)| *view).collect() } else { shown }
+}
+
 /// Builds the menu bar. The Actions and Filter menus start empty, since what they hold depends
 /// on the selected item and view.
 fn build_menu_bar(frame: &Frame) {
 	let file_menu = Menu::builder().build();
 	file_menu.append(ID_REFRESH, "&Refresh\tF5", "Reload the selected view", ItemKind::Normal);
 	file_menu.append_separator();
+	file_menu.append(ID_SETTINGS, "&Settings...\tCtrl+,", "Choose which views to show", ItemKind::Normal);
 	file_menu.append(ID_PROFILE, "Edit &Profile...", "Change your public GitHub profile", ItemKind::Normal);
 	file_menu.append(ID_SIGN_OUT, "Sign O&ut", "Forget your GitHub sign-in", ItemKind::Normal);
 	file_menu.append(ID_EXIT, "E&xit", "Close Gitview", ItemKind::Normal);

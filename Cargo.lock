@@ -961,6 +961,8 @@ dependencies = [
  "gitview-core",
  "keyring",
  "live-region",
+ "serde",
+ "toml",
  "wx-utils",
  "wxdragon",
 ]
