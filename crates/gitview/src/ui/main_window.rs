@@ -20,6 +20,7 @@ use wxdragon::{
 use super::{
 	actions::{self, Action, Marks, Selected},
 	dialogs::{self, Listing},
+	live,
 	text::comment_count,
 	view::{self, View},
 	worker,
@@ -55,6 +56,15 @@ impl Items {
 			Self::Issues(items) => items.iter().map(issue_label).collect(),
 		}
 	}
+
+	/// What tells each item apart across fetches, so the cursor can stay on an item that moved.
+	fn keys(&self) -> Vec<&str> {
+		match self {
+			Self::Notifications(items) => items.iter().map(|item| item.id.as_str()).collect(),
+			Self::Repositories(items) => items.iter().map(|item| item.full_name.as_str()).collect(),
+			Self::Issues(items) => items.iter().map(|item| item.html_url.as_str()).collect(),
+		}
+	}
 }
 
 /// What a view holds once it has been fetched. The labels are kept so a poll that changed
@@ -78,6 +88,9 @@ struct State {
 	signing_in: bool,
 	/// Issues closed or reopened lately, laid over what the search-backed views fetch.
 	issue_changes: Vec<IssueChange>,
+	/// What to say once the view on screen has been fetched again. Said any sooner, the list
+	/// changing under the cursor would talk over it.
+	announcement: Option<String>,
 }
 
 /// An issue Gitview closed or reopened. Assigned and Review requested come from GitHub's search,
@@ -121,6 +134,7 @@ impl Default for State {
 			issue_filter: IssueState::Open,
 			signing_in: false,
 			issue_changes: Vec::new(),
+			announcement: None,
 		}
 	}
 }
@@ -151,8 +165,7 @@ impl MainWindow {
 		let items_label = StaticText::builder(&panel).with_label(first.title()).build();
 		let items = ListBox::builder(&panel).build();
 		// Made after the lists, so no screen reader takes it for one's label.
-		let live_region = StaticText::builder(&panel).with_label("").with_size(Size::new(0, 0)).build();
-		live_region.show(false);
+		let live_region = live::live_region(&panel);
 		lay_out(panel, [(views_label, views), (items_label, items)]);
 		let state = State { arrangement, view: first, ..State::default() };
 		let window = Self {
@@ -443,11 +456,15 @@ impl MainWindow {
 				// A failed poll leaves whatever the view already holds on screen, and a
 				// view the user is not looking at stays quiet either way.
 				let state = self.state.borrow();
-				if state.loaded[view.index()].is_none() && state.view == view {
-					drop(state);
+				let (unloaded, current) = (state.loaded[view.index()].is_none(), state.view == view);
+				drop(state);
+				if unloaded && current {
 					self.items.clear();
 					self.items.append("Could not load this view.");
 					show_error(&self.frame, error, "Could Not Load GitHub Data");
+				}
+				if current {
+					self.speak_announcement();
 				}
 				return;
 			}
@@ -460,15 +477,35 @@ impl MainWindow {
 		let labels = items.labels();
 		let (current_view, unchanged, selection) = {
 			let mut state = self.state.borrow_mut();
-			let unchanged = state.loaded[view.index()].as_ref().is_some_and(|loaded| loaded.labels == labels);
+			let current = state.view == view;
+			let old = state.loaded[view.index()].as_ref();
+			let unchanged = old.is_some_and(|loaded| loaded.labels == labels);
+			// The cursor stays on the item it was on, even when the fetch moved it.
+			let selection = self.items.get_selection().filter(|_| current).and_then(|index| {
+				let key = old?.items.keys().get(index as usize).copied()?;
+				let moved_to = items.keys().iter().position(|new| *new == key)?;
+				u32::try_from(moved_to).ok()
+			});
+			let selection =
+				selection.or_else(|| self.items.get_selection()).unwrap_or_else(|| state.selections[view.index()]);
 			state.loaded[view.index()] = Some(Loaded { items, labels: labels.clone() });
-			(state.view, unchanged, state.selections[view.index()])
+			(state.view, unchanged, selection)
 		};
-		if current_view != view || unchanged {
+		if current_view != view {
 			return;
 		}
-		let selection = self.items.get_selection().unwrap_or(selection);
-		self.fill(view, &labels, selection);
+		if !unchanged {
+			self.fill(view, &labels, selection);
+		}
+		self.speak_announcement();
+	}
+
+	/// Says what an action did, now that the list it changed is settled.
+	fn speak_announcement(&self) {
+		let announcement = self.state.borrow_mut().announcement.take();
+		if let Some(message) = announcement {
+			self.announce(&message);
+		}
 	}
 
 	fn fill(&self, view: View, labels: &[String], selection: u32) {
@@ -542,7 +579,7 @@ impl MainWindow {
 				};
 				let window = self.clone();
 				dialogs::post_comment(self.frame, client, repo, number, "", move |_| {
-					window.announce("Comment posted.");
+					window.state.borrow_mut().announcement = Some("Comment posted.".to_owned());
 					window.fetch_all();
 				});
 			}
@@ -639,8 +676,8 @@ impl MainWindow {
 		}
 	}
 
-	/// Makes a change on GitHub, says `message` once it is made, then fetches every view again
-	/// so the lists show it. `issue_change` is set when the change closes or reopens an issue.
+	/// Makes a change on GitHub, then fetches every view again so the lists show it, and says
+	/// `message` once the view on screen has caught up. `issue_change` is set when the change closes or reopens an issue.
 	fn change(
 		&self,
 		message: impl Into<String>,
@@ -651,7 +688,7 @@ impl MainWindow {
 		let message = message.into();
 		worker::spawn(job, move |result| match result {
 			Ok(()) => {
-				window.announce(&message);
+				window.state.borrow_mut().announcement = Some(message);
 				if let Some(change) = issue_change {
 					window.state.borrow_mut().issue_changes.push(change);
 					// Search would bring the old state straight back, so the lists are fixed

@@ -1,5 +1,6 @@
 mod actions;
 mod dialogs;
+mod live;
 mod main_window;
 mod text;
 mod view;

@@ -13,6 +13,7 @@ use wxdragon::{
 
 use super::{comment::post_comment, page::show_page};
 use crate::ui::{
+	live,
 	text::{body_html, comment_count, local_time},
 	worker,
 };
@@ -123,8 +124,7 @@ fn show_thread_dialog(parent: &dyn WxWidget, client: Arc<Client>, repo: String, 
 	let label = StaticText::builder(&dialog).with_label(&format!("&Thread. {summary}")).build();
 	let list = ListBox::builder(&dialog).with_size(THREAD_SIZE).build();
 	// Speaks what copying did. Made after the list, so no screen reader takes it for its label.
-	let live_region = StaticText::builder(&dialog).with_label("").with_size(Size::new(0, 0)).build();
-	live_region.show(false);
+	let live_region = live::live_region(&dialog);
 	let posts: Vec<Post> =
 		std::iter::once(Post::of_issue(issue)).chain(comments.iter().map(Post::of_comment)).collect();
 	for post in &posts {

@@ -5,7 +5,7 @@ use wx_utils::{add_ok_cancel_footer, build_ok_cancel_buttons, dialog_padding, sh
 use wxdragon::accessible::AccRole;
 use wxdragon::prelude::*;
 
-use crate::ui::view::View;
+use crate::ui::{live, view::View};
 
 const LIST_SIZE: Size = Size { width: 260, height: 180 };
 
@@ -22,8 +22,7 @@ pub fn show_settings_dialog(parent: &dyn WxWidget, views: &[(View, bool)]) -> Op
 	let list = CheckListBox::builder(&views_page).with_size(LIST_SIZE).build();
 	// Speaks where a moved view ended up. Made after the list, so no screen reader takes it for
 	// the list's label.
-	let live_region = StaticText::builder(&views_page).with_label("").with_size(Size::new(0, 0)).build();
-	live_region.show(false);
+	let live_region = live::live_region(&views_page);
 	let up_button = Button::builder(&views_page).with_label("Move &up").build();
 	let down_button = Button::builder(&views_page).with_label("Move &down").build();
 	let views = Rc::new(RefCell::new(views.to_vec()));
