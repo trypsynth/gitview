@@ -162,8 +162,9 @@ impl Client {
 		self.get("/user/repos?sort=updated&per_page=100")
 	}
 
+	/// Repositories the signed-in user has starred, most recently starred first.
 	pub fn starred(&self) -> Result<Vec<Repository>, Error> {
-		self.get("/user/starred?per_page=100")
+		self.get("/user/starred?sort=created&direction=desc&per_page=100")
 	}
 
 	/// Repositories the signed-in user watches, which GitHub calls subscriptions.
