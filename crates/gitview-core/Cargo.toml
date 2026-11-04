@@ -16,7 +16,7 @@ serde = { version = "1.0.229", features = ["derive"] }
 thiserror = "2.0.21"
 ureq = { version = "3.5.1", features = ["json"] }
 uniffi = { version = "0.32.2", features = ["cli"], optional = true }
-scraper = "0.27.0"
+scraper = "0.29.0"
 ego-tree = "0.11.1"
 
 [build-dependencies]

@@ -14,7 +14,7 @@ keyring = "4.2.0"
 live-region = "0.3.3"
 serde = { version = "1.0.229", features = ["derive"] }
 toml = "1.2.0"
-wx-utils = "0.3.1"
+wx-utils = "0.4.4"
 wxdragon = { version = "0.9.24", features = ["webview"] }
 
 [build-dependencies]
