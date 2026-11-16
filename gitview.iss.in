@@ -1,0 +1,35 @@
+[Setup]
+	AppName=Gitview
+	AppVersion=@PROJECT_VERSION@
+	AppPublisher=Quin Gillespie
+	AppPublisherURL=https://github.com/trypsynth/gitview
+	AppSupportURL=https://github.com/trypsynth/gitview/issues
+	AppUpdatesURL=https://github.com/trypsynth/gitview/releases
+	DefaultDirName={autopf}\Gitview
+	DisableProgramGroupPage=yes
+	DisableDirPage=yes
+	OutputDir=.
+	OutputBaseFilename=gitview_setup
+	Compression=lzma2
+	SolidCompression=yes
+	WizardStyle=modern
+	UninstallDisplayIcon={app}\gitview.exe
+	ArchitecturesAllowed=@ARCH_ALLOWED@
+	ArchitecturesInstallIn64BitMode=@ARCH_MODE@
+
+[Languages]
+	Name: "english"; MessagesFile: "compiler:Default.isl"
+
+[Files]
+	Source: "gitview.exe"; DestDir: "{app}"; Flags: ignoreversion
+
+[Tasks]
+	Name: "desktopicon"; Description: "Desktop Shortcut"
+	Name: "startmenuicon"; Description: "Start Menu Shortcut"; Flags: unchecked
+
+[Icons]
+	Name: "{autodesktop}\Gitview"; Filename: "{app}\gitview.exe"; Tasks: desktopicon
+	Name: "{autoprograms}\Gitview"; Filename: "{app}\gitview.exe"; Tasks: startmenuicon
+
+[Run]
+	Filename: "{app}\gitview.exe"; Description: "Launch Gitview"; Flags: nowait postinstall skipifsilent
