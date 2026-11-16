@@ -447,16 +447,26 @@ impl MainWindow {
 	}
 
 	fn open_settings(&self) {
-		let arrangement = self.state.borrow().arrangement.clone();
-		let Some(arrangement) = dialogs::show_settings_dialog(&self.frame, &arrangement) else {
+		let mut config = config::load();
+		let current =
+			dialogs::Settings { views: self.state.borrow().arrangement.clone(), log_level: config.log_level() };
+		let Some(dialogs::Settings { views: arrangement, log_level }) =
+			dialogs::show_settings_dialog(&self.frame, &current, &config::folder())
+		else {
 			return;
 		};
-		let mut config = config::load();
+		if log_level != current.log_level {
+			logkeeper::set_level(log_level);
+			tracing::info!(level = %log_level, "log level changed");
+			config.log_level = Some(log_level.to_string());
+		}
 		config.views = config::Views {
 			order: arrangement.iter().map(|(view, _)| view.id().to_owned()).collect(),
 			hidden: arrangement.iter().filter(|(_, shown)| !shown).map(|(view, _)| view.id().to_owned()).collect(),
 		};
-		tracing::info!(order = ?config.views.order, hidden = ?config.views.hidden, "views changed");
+		if arrangement != current.views {
+			tracing::info!(order = ?config.views.order, hidden = ?config.views.hidden, "views changed");
+		}
 		if let Err(error) = config::save(&config) {
 			notice::warning(
 				&self.frame,

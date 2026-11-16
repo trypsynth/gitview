@@ -14,7 +14,7 @@ pub use issues::{Listing, open_issues};
 pub use page::open_subject;
 pub use profile::edit_profile;
 pub use repository::open_repository;
-pub use settings::show_settings_dialog;
+pub use settings::{Settings, show_settings_dialog};
 #[cfg(windows)]
 pub use shortcuts::show_shortcuts_dialog;
 pub use sign_in::show_sign_in_dialog;
