@@ -1,17 +1,18 @@
 use std::sync::Arc;
 
 use gitview_core::{Client, models::Comment};
-use wx_utils::{add_ok_cancel_footer, build_ok_cancel_buttons, dialog_padding, show_error};
+use wx_utils::{
+	add_ok_cancel_footer, build_ok_cancel_buttons, dialog_padding, show_error,
+	tasks::{background_blocking, spawn_for},
+};
 use wxdragon::prelude::*;
-
-use crate::ui::worker;
 
 const COMMENT_SIZE: Size = Size { width: 500, height: 200 };
 
 /// Asks for a comment on issue `number` in `repo` (`owner/name`) and posts it, then hands the
 /// posted comment to `done`. `initial` starts the text off, such as a quote being replied to.
 /// When posting fails, the dialog comes back with the text still in it.
-pub fn post_comment<P: WxWidget + Copy + 'static>(
+pub fn post_comment<P: WxWidget + WxEvtHandler + Copy + 'static>(
 	parent: P,
 	client: Arc<Client>,
 	repo: String,
@@ -19,22 +20,22 @@ pub fn post_comment<P: WxWidget + Copy + 'static>(
 	initial: &str,
 	done: impl FnOnce(Comment) + 'static,
 ) {
-	let Some(body) = show_comment_dialog(&parent, number, initial) else {
-		return;
-	};
-	let post_client = Arc::clone(&client);
-	let post_repo = repo.clone();
-	let post_body = body.clone();
-	worker::spawn(
-		move || post_client.add_comment(&post_repo, number, &post_body),
-		move |result| match result {
-			Ok(comment) => done(comment),
-			Err(error) => {
-				show_error(&parent, error, "Could Not Post Comment");
-				post_comment(parent, client, repo, number, &body, done);
+	let mut text = initial.to_owned();
+	spawn_for(&parent, async move {
+		while let Some(body) = show_comment_dialog(&parent, number, &text) {
+			let (client, repo, posted) = (Arc::clone(&client), repo.clone(), body.clone());
+			match background_blocking(move || client.add_comment(&repo, number, &posted)).await {
+				Ok(comment) => {
+					done(comment);
+					return;
+				}
+				Err(error) => {
+					show_error(&parent, error, "Could Not Post Comment");
+					text = body;
+				}
 			}
-		},
-	);
+		}
+	});
 }
 
 /// Returns the comment text, or `None` when the user cancels or leaves it blank.

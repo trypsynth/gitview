@@ -1,5 +1,5 @@
 use std::{
-	cell::{Cell, RefCell},
+	cell::RefCell,
 	rc::Rc,
 	sync::{
 		Arc,
@@ -8,14 +8,15 @@ use std::{
 };
 
 use gitview_core::auth;
-use wx_utils::{dialog_padding, show_error};
+use wx_utils::{
+	dialog_padding, show_error,
+	tasks::{background_blocking, spawn_for},
+};
 use wxdragon::{
 	clipboard::Clipboard,
 	prelude::*,
 	utils::{BrowserLaunchFlags, launch_default_browser},
 };
-
-use crate::ui::worker;
 
 const TITLE: &str = "Sign In to GitHub";
 
@@ -59,29 +60,22 @@ pub fn show_sign_in_dialog(parent: &dyn WxWidget) -> Option<String> {
 	content.add(&cancel_button, 0, SizerFlag::AlignRight | SizerFlag::All, padding);
 	dialog.set_sizer_and_fit(content, true);
 	let token = Rc::new(RefCell::new(None));
-	let closed = Rc::new(Cell::new(false));
+	// Waiting for the token blocks, so closing the dialog can't stop it; this flag does.
 	let cancel = Arc::new(AtomicBool::new(false));
-	let worker_cancel = Arc::clone(&cancel);
+	let wait_cancel = Arc::clone(&cancel);
 	let done_token = Rc::clone(&token);
-	let done_closed = Rc::clone(&closed);
-	worker::spawn(
-		move || auth::wait_for_token(&code, &worker_cancel),
-		move |result| {
-			if done_closed.get() {
-				return;
+	spawn_for(&dialog, async move {
+		match background_blocking(move || auth::wait_for_token(&code, &wait_cancel)).await {
+			Ok(value) => {
+				*done_token.borrow_mut() = Some(value);
+				dialog.end_modal(ID_OK);
 			}
-			match result {
-				Ok(value) => {
-					*done_token.borrow_mut() = Some(value);
-					dialog.end_modal(ID_OK);
-				}
-				Err(error) => {
-					show_error(&dialog, error, TITLE);
-					dialog.end_modal(ID_CANCEL);
-				}
+			Err(error) => {
+				show_error(&dialog, error, TITLE);
+				dialog.end_modal(ID_CANCEL);
 			}
-		},
-	);
+		}
+	});
 	dialog.centre();
 	if let Some(code_field) = &code_field {
 		code_field.set_focus();
@@ -91,7 +85,6 @@ pub fn show_sign_in_dialog(parent: &dyn WxWidget) -> Option<String> {
 	}
 	launch_default_browser(&verification_uri, BrowserLaunchFlags::Default);
 	dialog.show_modal();
-	closed.set(true);
 	cancel.store(true, Ordering::Relaxed);
 	dialog.destroy();
 	token.take()

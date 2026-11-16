@@ -1,13 +1,14 @@
-use std::{cell::Cell, rc::Rc, sync::Arc, thread};
+use std::sync::Arc;
 
 use gitview_core::{
 	Client, Error,
 	models::{Profile, ProfileUpdate},
 };
-use wx_utils::{confirm, dialog_padding, show_error};
+use wx_utils::{
+	confirm, dialog_padding, show_error,
+	tasks::{background_blocking, spawn_for},
+};
 use wxdragon::prelude::*;
-
-use crate::ui::worker;
 
 const TITLE: &str = "Edit Profile";
 const HIDE_EMAIL: &str = "Don't show my email address";
@@ -26,15 +27,13 @@ struct Loaded {
 
 /// Loads the signed-in user's profile and shows it for editing. `reauthorize` runs when the
 /// sign-in cannot edit profiles and the user agrees to sign in again.
-pub fn edit_profile<P: WxWidget + Copy + 'static>(
+pub fn edit_profile<P: WxWidget + WxEvtHandler + Copy + 'static>(
 	parent: P,
 	client: Arc<Client>,
 	reauthorize: impl FnOnce() + 'static,
 ) {
-	let fetch_client = Arc::clone(&client);
-	worker::spawn(
-		move || load(&fetch_client),
-		move |result| match result {
+	spawn_for(&parent, async move {
+		match load(Arc::clone(&client)).await {
 			Ok(loaded) => show_profile_dialog(&parent, client, loaded),
 			Err(Error::NeedsProfileAccess) => {
 				if confirm(
@@ -46,22 +45,23 @@ pub fn edit_profile<P: WxWidget + Copy + 'static>(
 				}
 			}
 			Err(error) => show_error(&parent, error, "Could Not Load Profile"),
-		},
-	);
+		}
+	});
 }
 
-fn load(client: &Client) -> Result<Loaded, Error> {
+async fn load(client: Arc<Client>) -> Result<Loaded, Error> {
 	// The profile goes first on its own: it is what tells a sign-in without the scope apart.
-	let profile = client.profile()?;
-	thread::scope(|scope| {
-		let emails = scope.spawn(|| client.emails());
-		let social_accounts = client.social_accounts()?;
-		let emails = emails.join().expect("email fetch panicked")?;
-		Ok(Loaded {
-			profile,
-			emails: emails.into_iter().filter(|email| email.verified).map(|email| email.email).collect(),
-			social_accounts: social_accounts.into_iter().map(|account| account.url).collect(),
-		})
+	let profile_client = Arc::clone(&client);
+	let profile = background_blocking(move || profile_client.profile()).await?;
+	// The other two start together, so they travel side by side.
+	let emails_client = Arc::clone(&client);
+	let emails = background_blocking(move || emails_client.emails());
+	let social_accounts = background_blocking(move || client.social_accounts());
+	let (emails, social_accounts) = (emails.await?, social_accounts.await?);
+	Ok(Loaded {
+		profile,
+		emails: emails.into_iter().filter(|email| email.verified).map(|email| email.email).collect(),
+		social_accounts: social_accounts.into_iter().map(|account| account.url).collect(),
 	})
 }
 
@@ -111,8 +111,6 @@ fn show_profile_dialog(parent: &dyn WxWidget, client: Arc<Client>, loaded: Loade
 	let cancel_button = Button::builder(&dialog).with_id(ID_CANCEL).with_label("Cancel").build();
 	save_button.set_default();
 	dialog.set_escape_id(ID_CANCEL);
-	let closed = Rc::new(Cell::new(false));
-	let save_closed = Rc::clone(&closed);
 	save_button.on_click(move |_| {
 		// The first choice hides the address, which GitHub takes as an empty one.
 		let email = email
@@ -135,23 +133,17 @@ fn show_profile_dialog(parent: &dyn WxWidget, client: Arc<Client>, loaded: Loade
 		let removed: Vec<String> = social_accounts.iter().filter(|url| !wanted.contains(url)).cloned().collect();
 		let added: Vec<String> = wanted.iter().filter(|url| !social_accounts.contains(url)).cloned().collect();
 		let client = Arc::clone(&client);
-		let closed = Rc::clone(&save_closed);
 		save_button.enable(false);
-		worker::spawn(
-			move || save(&client, &update, &removed, &added),
-			move |result| {
-				if closed.get() {
-					return;
+		// Tied to the dialog, so a save that finishes after Cancel touches nothing.
+		spawn_for(&dialog, async move {
+			match background_blocking(move || save(&client, &update, &removed, &added)).await {
+				Ok(()) => dialog.end_modal(ID_OK),
+				Err(error) => {
+					show_error(&dialog, error, "Could Not Save Profile");
+					save_button.enable(true);
 				}
-				match result {
-					Ok(()) => dialog.end_modal(ID_OK),
-					Err(error) => {
-						show_error(&dialog, error, "Could Not Save Profile");
-						save_button.enable(true);
-					}
-				}
-			},
-		);
+			}
+		});
 	});
 	let button_row = BoxSizer::builder(Orientation::Horizontal).build();
 	button_row.add(&save_button, 0, SizerFlag::Right, padding);
@@ -164,7 +156,6 @@ fn show_profile_dialog(parent: &dyn WxWidget, client: Arc<Client>, loaded: Loade
 	dialog.centre();
 	name.set_focus();
 	dialog.show_modal();
-	closed.set(true);
 	dialog.destroy();
 }
 

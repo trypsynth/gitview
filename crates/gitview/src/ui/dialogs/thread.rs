@@ -1,10 +1,13 @@
-use std::{cell::RefCell, rc::Rc, sync::Arc, thread};
+use std::{cell::RefCell, rc::Rc, sync::Arc};
 
 use gitview_core::{
-	Client, Error, html_to_text,
+	Client, html_to_text,
 	models::{Comment, Issue},
 };
-use wx_utils::{dialog_padding, show_error};
+use wx_utils::{
+	dialog_padding, show_error,
+	tasks::{background_blocking, spawn_for},
+};
 use wxdragon::{
 	clipboard::Clipboard,
 	prelude::*,
@@ -15,7 +18,6 @@ use super::{comment::post_comment, open_on_enter, page::show_page};
 use crate::ui::{
 	live,
 	text::{body_html, comment_count, local_time},
-	worker,
 };
 
 const THREAD_SIZE: Size = Size { width: 700, height: 450 };
@@ -93,22 +95,27 @@ impl Post {
 }
 
 /// Loads issue or pull request `number` in `repo` (`owner/name`) and shows its thread.
-pub fn open_issue<P: WxWidget + Copy + 'static>(parent: P, client: Arc<Client>, repo: String, number: u64) {
-	let fetch_client = Arc::clone(&client);
-	let fetch_repo = repo.clone();
-	worker::spawn(
-		move || {
-			thread::scope(|scope| {
-				let comments = scope.spawn(|| fetch_client.comments(&fetch_repo, number));
-				let issue = fetch_client.issue(&fetch_repo, number)?;
-				Ok::<_, Error>((issue, comments.join().expect("comment fetch panicked")?))
-			})
-		},
-		move |result| match result {
+pub fn open_issue<P: WxWidget + WxEvtHandler + Copy + 'static>(
+	parent: P,
+	client: Arc<Client>,
+	repo: String,
+	number: u64,
+) {
+	// Both start now, so they travel side by side.
+	let (issue_client, issue_repo) = (Arc::clone(&client), repo.clone());
+	let issue = background_blocking(move || issue_client.issue(&issue_repo, number));
+	let (comments_client, comments_repo) = (Arc::clone(&client), repo.clone());
+	let comments = background_blocking(move || comments_client.comments(&comments_repo, number));
+	spawn_for(&parent, async move {
+		let fetched = match issue.await {
+			Ok(issue) => comments.await.map(|comments| (issue, comments)),
+			Err(error) => Err(error),
+		};
+		match fetched {
 			Ok((issue, comments)) => show_thread_dialog(&parent, client, repo, &issue, &comments),
 			Err(error) => show_error(&parent, error, "Could Not Open Issue"),
-		},
-	);
+		}
+	});
 }
 
 fn show_thread_dialog(parent: &dyn WxWidget, client: Arc<Client>, repo: String, issue: &Issue, comments: &[Comment]) {

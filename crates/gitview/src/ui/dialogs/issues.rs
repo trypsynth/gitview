@@ -4,11 +4,14 @@ use gitview_core::{
 	Client,
 	models::{Issue, IssueState},
 };
-use wx_utils::{dialog_padding, show_error};
+use wx_utils::{
+	dialog_padding, show_error,
+	tasks::{background_blocking, spawn_for},
+};
 use wxdragon::prelude::*;
 
 use super::{open_issue, open_on_enter};
-use crate::ui::{text::comment_count, worker};
+use crate::ui::text::comment_count;
 
 const LIST_SIZE: Size = Size { width: 600, height: 400 };
 
@@ -39,27 +42,25 @@ impl Listing {
 }
 
 /// Loads the issues and pull requests in `repo` (`owner/name`) and lists the ones `listing` asks for.
-pub fn open_issues<P: WxWidget + Copy + 'static>(
+pub fn open_issues<P: WxWidget + WxEvtHandler + Copy + 'static>(
 	parent: P,
 	client: Arc<Client>,
 	repo: String,
 	state: IssueState,
 	listing: Listing,
 ) {
-	let fetch_client = Arc::clone(&client);
-	let fetch_repo = repo.clone();
-	worker::spawn(
-		// GitHub lists both kinds together, so the one not asked for is dropped here.
-		move || {
-			fetch_client
-				.issues(&fetch_repo, state)
-				.map(|issues| issues.into_iter().filter(|issue| listing.includes(issue)).collect())
-		},
-		move |result| match result {
-			Ok(issues) => show_issues_dialog(&parent, client, repo, listing, issues),
+	let (fetch_client, fetch_repo) = (Arc::clone(&client), repo.clone());
+	let fetch = background_blocking(move || fetch_client.issues(&fetch_repo, state));
+	spawn_for(&parent, async move {
+		match fetch.await {
+			// GitHub lists both kinds together, so the one not asked for is dropped here.
+			Ok(issues) => {
+				let issues = issues.into_iter().filter(|issue| listing.includes(issue)).collect();
+				show_issues_dialog(&parent, client, repo, listing, issues);
+			}
 			Err(error) => show_error(&parent, error, "Could Not Load Issues"),
-		},
-	);
+		}
+	});
 }
 
 fn show_issues_dialog(parent: &dyn WxWidget, client: Arc<Client>, repo: String, listing: Listing, issues: Vec<Issue>) {

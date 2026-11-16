@@ -10,7 +10,10 @@ use gitview_core::{
 	models::{CloseReason, Issue, IssueState, Notification, Repository},
 };
 use quiet_list::{QuietList, Select};
-use wx_utils::{dialog_padding, prompt_text, show_error, show_warning};
+use wx_utils::{
+	dialog_padding, prompt_text, show_error, show_warning,
+	tasks::{Queue, background_blocking, spawn_for},
+};
 use wxdragon::{
 	clipboard::Clipboard,
 	prelude::*,
@@ -24,7 +27,6 @@ use super::{
 	live,
 	text::comment_count,
 	view::{self, View},
-	worker,
 };
 use crate::{config, token};
 
@@ -158,6 +160,9 @@ pub struct MainWindow {
 	/// nothing on screen.
 	live_region: StaticText,
 	poll_timer: Rc<Timer<Frame>>,
+	/// Every change Gitview makes on GitHub goes through here, one at a time, so changes arrive
+	/// in the order the user made them, such as a star and the unstar after it.
+	writes: Queue,
 	state: Rc<RefCell<State>>,
 }
 
@@ -187,6 +192,7 @@ impl MainWindow {
 			lists: Rc::new(lists),
 			live_region,
 			poll_timer: Rc::new(Timer::new(&frame)),
+			writes: Queue::new(),
 			state: Rc::new(RefCell::new(state)),
 		};
 		window.show_only(first);
@@ -196,9 +202,11 @@ impl MainWindow {
 		window.update_actions_menu();
 		frame.show(true);
 		views.set_focus();
-		worker::spawn(token::load, move |token| match token {
-			Some(token) => window.connect(token),
-			None => window.sign_in(),
+		spawn_for(&frame, async move {
+			match background_blocking(token::load).await {
+				Some(token) => window.connect(token),
+				None => window.sign_in(),
+			}
 		});
 	}
 
@@ -465,18 +473,16 @@ impl MainWindow {
 		}) else {
 			return;
 		};
+		let fetched = background_blocking(move || match view {
+			View::Notifications => client.notifications(!unread_only).map(Items::Notifications),
+			View::Repositories => client.repositories().map(Items::Repositories),
+			View::Starred => client.starred().map(Items::Repositories),
+			View::Watched => client.watched().map(Items::Repositories),
+			View::Assigned => client.assigned(issue_filter).map(Items::Issues),
+			View::ReviewRequested => client.review_requests(issue_filter).map(Items::Issues),
+		});
 		let window = self.clone();
-		worker::spawn(
-			move || match view {
-				View::Notifications => client.notifications(!unread_only).map(Items::Notifications),
-				View::Repositories => client.repositories().map(Items::Repositories),
-				View::Starred => client.starred().map(Items::Repositories),
-				View::Watched => client.watched().map(Items::Repositories),
-				View::Assigned => client.assigned(issue_filter).map(Items::Issues),
-				View::ReviewRequested => client.review_requests(issue_filter).map(Items::Issues),
-			},
-			move |result| window.store(view, result),
-		);
+		spawn_for(&self.frame, async move { window.store(view, fetched.await) });
 	}
 
 	fn store(&self, view: View, result: Result<Items, Error>) {
@@ -723,22 +729,25 @@ impl MainWindow {
 		issue_change: Option<IssueChange>,
 		job: impl FnOnce() -> Result<(), Error> + Send + 'static,
 	) {
+		let made = self.writes.run(job);
 		let window = self.clone();
 		let message = message.into();
-		worker::spawn(job, move |result| match result {
-			Ok(()) => {
-				window.state.borrow_mut().announcement = Some(message);
-				if let Some(change) = issue_change {
-					window.state.borrow_mut().issue_changes.push(change);
-					// Search would bring the old state straight back, so the lists are fixed
-					// here rather than waiting on the fetch.
-					for view in [View::Assigned, View::ReviewRequested] {
-						window.apply_issue_changes(view);
+		spawn_for(&self.frame, async move {
+			match made.await {
+				Ok(()) => {
+					window.state.borrow_mut().announcement = Some(message);
+					if let Some(change) = issue_change {
+						window.state.borrow_mut().issue_changes.push(change);
+						// Search would bring the old state straight back, so the lists are fixed
+						// here rather than waiting on the fetch.
+						for view in [View::Assigned, View::ReviewRequested] {
+							window.apply_issue_changes(view);
+						}
 					}
+					window.fetch_all();
 				}
-				window.fetch_all();
+				Err(error) => show_error(&window.frame, error, "GitHub Did Not Make the Change"),
 			}
-			Err(error) => show_error(&window.frame, error, "GitHub Did Not Make the Change"),
 		});
 	}
 
@@ -807,14 +816,13 @@ impl MainWindow {
 			show_error(&frame, "GitHub gives no link for this notification.", "No Link");
 			return;
 		};
-		worker::spawn(
-			move || client.subject(&subject_url),
-			move |result| match result.map(|details| details.html_url) {
+		spawn_for(&frame, async move {
+			match background_blocking(move || client.subject(&subject_url)).await.map(|details| details.html_url) {
 				Ok(Some(url)) => use_link(&url),
 				Ok(None) => show_error(&frame, "GitHub gives no link for this notification.", "No Link"),
 				Err(error) => show_error(&frame, error, "Could Not Get the Link"),
-			},
-		);
+			}
+		});
 	}
 
 	/// Opens the issue thread behind a notification, or for releases and the like, what the
@@ -822,7 +830,8 @@ impl MainWindow {
 	fn open_notification(&self, client: Arc<Client>, notification: &Notification) {
 		let read_client = Arc::clone(&client);
 		let id = notification.id.clone();
-		worker::spawn(move || read_client.mark_notification_read(&id), |_| {});
+		// Nothing waits on this, and a failure costs only a notification left unread.
+		self.writes.push(move || drop(read_client.mark_notification_read(&id)));
 		if let Some(number) = notification.issue_number() {
 			dialogs::open_issue(self.frame, client, notification.repository.full_name.clone(), number);
 			return;
