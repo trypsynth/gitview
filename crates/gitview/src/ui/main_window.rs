@@ -11,7 +11,7 @@ use gitview_core::{
 };
 use quiet_list::{QuietList, Select};
 use wx_utils::{
-	dialog_padding, post_to_ui, prompt_text, show_error, show_warning,
+	post_to_ui, prompt_text, show_error, show_warning,
 	tasks::{Queue, background_blocking, spawn_for},
 };
 use wxdragon::{
@@ -25,6 +25,7 @@ use super::{
 	actions::{self, Action, Marks, Selected},
 	dialogs::{self, Listing},
 	live,
+	sectioned::SectionedLists,
 	text::comment_count,
 	view::{self, View},
 };
@@ -148,20 +149,12 @@ thread_local! {
 	static OPEN_WINDOW: RefCell<Option<MainWindow>> = const { RefCell::new(None) };
 }
 
-/// A view's list of items and the label that names it.
-struct ViewList {
-	label: StaticText,
-	list: QuietList<String>,
-}
-
 #[derive(Clone)]
 pub struct MainWindow {
 	frame: Frame,
-	panel: Panel,
-	views: ListBox,
-	/// Every view's list, by view index, with only the view on screen shown. A list's spoken
-	/// name is fixed when it is made, so each view has one of its own rather than sharing one.
-	lists: Rc<[ViewList; View::COUNT]>,
+	/// The Views list and every view's list of items, with only the view on screen shown. A
+	/// list's spoken name is fixed when it is made, so each view has one of its own.
+	sections: SectionedLists<View>,
 	/// A hidden label that speaks through the screen reader, to confirm actions that change
 	/// nothing on screen.
 	live_region: StaticText,
@@ -179,37 +172,29 @@ impl MainWindow {
 		let frame = Frame::builder().with_title("Gitview").with_size(WINDOW_SIZE).build();
 		build_menu_bar(&frame);
 		let panel = Panel::builder(&frame).build();
-		let views_label = StaticText::builder(&panel).with_label("Views").build();
-		let views = ListBox::builder(&panel).build();
 		let settings = config::load().views;
 		let arrangement = view::arrange(&settings.order, &settings.hidden);
 		let first = shown(&arrangement)[0];
-		// Each label is made just before its list, so screen readers take it for the list's.
-		let lists = View::ALL.map(|view| {
-			let label = StaticText::builder(&panel).with_label(view.title()).build();
-			ViewList { label, list: QuietList::new(&panel, view.title()) }
-		});
+		// Views, then the items in the one chosen; opening an item shows it in a dialog of its own.
+		let sections = SectionedLists::new(&panel, "Views", &View::ALL.map(|view| (view, view.title())));
 		// Made after the lists, so no screen reader takes it for one's label.
 		let live_region = live::live_region(&panel);
-		lay_out(panel, views_label, views, &lists);
+		panel.set_sizer(sections.sizer(2), true);
 		let state = State { arrangement, view: first, ..State::default() };
 		let window = Self {
 			frame,
-			panel,
-			views,
-			lists: Rc::new(lists),
+			sections,
 			live_region,
 			poll_timer: Rc::new(Timer::new(&frame)),
 			writes: Queue::new(),
 			state: Rc::new(RefCell::new(state)),
 		};
-		window.show_only(first);
 		window.fill_views();
 		window.bind_events();
 		window.update_filter_menu();
 		window.update_actions_menu();
 		frame.show(true);
-		views.set_focus();
+		window.sections.focus_sections();
 		if let Some(door) = door {
 			OPEN_WINDOW.set(Some(window.clone()));
 			// Gitview opens no files, so whatever another copy was started with, it means "come
@@ -271,16 +256,8 @@ impl MainWindow {
 			},
 		});
 		let window = self.clone();
-		self.views.on_selection_changed(move |event| {
-			let view = event.get_selection().and_then(|index| usize::try_from(index).ok()).and_then(|index| {
-				let state = window.state.borrow();
-				shown(&state.arrangement).get(index).copied()
-			});
-			if let Some(view) = view {
-				window.show_view(view);
-			}
-		});
-		for ViewList { list, .. } in self.lists.iter() {
+		self.sections.on_section_changed(move |view| window.show_view(view));
+		for (_, list) in self.sections.lists() {
 			let window = self.clone();
 			list.on_activate(move || window.perform(Action::Open));
 			let window = self.clone();
@@ -387,26 +364,14 @@ impl MainWindow {
 	/// Lists the shown views in their chosen order. The view on screen stays when it is still
 	/// shown; otherwise the first shown view takes its place.
 	fn fill_views(&self) {
-		let (shown, current) = {
-			let state = self.state.borrow();
-			(shown(&state.arrangement), state.view)
-		};
-		self.views.clear();
-		for view in &shown {
-			self.views.append(view.title());
-		}
-		let index = shown.iter().position(|view| *view == current).unwrap_or(0);
-		self.views.set_selection(u32::try_from(index).unwrap_or_default(), true);
-		if shown[index] != current {
-			self.show_view(shown[index]);
-		}
+		let shown = shown(&self.state.borrow().arrangement);
+		self.sections.set_order(&shown);
 	}
 
-	/// Shows a view the user just moved to. Its list kept its items and its place while hidden,
-	/// since every fetch fills it.
+	/// Catches up with a view the user just moved to, now on screen. Its list kept its items and
+	/// its place while hidden, since every fetch fills it.
 	fn show_view(&self, view: View) {
 		self.state.borrow_mut().view = view;
-		self.show_only(view);
 		self.update_filter_menu();
 		self.update_actions_menu();
 		// Startup loads every view, so this only happens when that fetch is still in flight or
@@ -417,27 +382,12 @@ impl MainWindow {
 		}
 	}
 
-	/// Shows `view`'s label and list and hides the others'. Focus in a list being hidden moves to
-	/// the one shown, rather than staying on a control no one can see.
-	fn show_only(&self, view: View) {
-		let had_focus = self.lists.iter().any(|ViewList { list, .. }| list.has_focus());
-		for (index, ViewList { label, list }) in self.lists.iter().enumerate() {
-			let shown = index == view.index();
-			label.show(shown);
-			list.show(shown);
-		}
-		self.panel.layout();
-		if had_focus {
-			self.list(view).set_focus();
-		}
-	}
-
 	fn list(&self, view: View) -> &QuietList<String> {
-		&self.lists[view.index()].list
+		self.sections.list(view)
 	}
 
 	fn current_list(&self) -> &QuietList<String> {
-		self.list(self.state.borrow().view)
+		self.sections.current_list()
 	}
 
 	/// Empties `view`'s list, which is how a view shows that it is loading.
@@ -934,25 +884,6 @@ fn parse_issue_reference(text: &str, repo: &str) -> Option<(String, u64)> {
 	let number = number.trim_end_matches('/').parse().ok()?;
 	let other_repo = other_repo.trim();
 	Some((if other_repo.is_empty() { repo.to_owned() } else { other_repo.to_owned() }, number))
-}
-
-// Views, then the items in the selected view; opening an item shows what it says in a dialog of
-// its own. Each label sits above its list. Every view's list is in the second column, where only
-// the shown one takes up room.
-fn lay_out(panel: Panel, views_label: StaticText, views: ListBox, lists: &[ViewList]) {
-	let padding = dialog_padding(&panel);
-	let sizer = BoxSizer::builder(Orientation::Horizontal).build();
-	let views_column = BoxSizer::builder(Orientation::Vertical).build();
-	views_column.add(&views_label, 0, SizerFlag::empty(), 0);
-	views_column.add(&views, 1, SizerFlag::Expand, 0);
-	sizer.add_sizer(&views_column, 1, SizerFlag::Expand | SizerFlag::All, padding);
-	let items_column = BoxSizer::builder(Orientation::Vertical).build();
-	for ViewList { label, list } in lists {
-		items_column.add(label, 0, SizerFlag::empty(), 0);
-		items_column.add(list, 1, SizerFlag::Expand, 0);
-	}
-	sizer.add_sizer(&items_column, 2, SizerFlag::Expand | SizerFlag::All, padding);
-	panel.set_sizer(sizer, true);
 }
 
 fn notification_label(notification: &Notification) -> String {

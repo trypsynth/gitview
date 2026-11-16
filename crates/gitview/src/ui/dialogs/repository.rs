@@ -20,6 +20,7 @@ use wxdragon::prelude::*;
 
 use super::{is_plain_enter, page::show_page};
 use crate::ui::{
+	sectioned::SectionedLists,
 	text::{count, local_time},
 	web,
 };
@@ -30,7 +31,7 @@ const LIST_SIZE: Size = Size { width: 600, height: 400 };
 const MESSAGE_KEY: &str = "";
 
 /// What a repository's dialog lists, in the order its Sections list shows them.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum Section {
 	Commits,
 }
@@ -50,15 +51,8 @@ impl Section {
 pub fn open_repository<P: WxWidget + WxEvtHandler + Copy + 'static>(parent: P, client: Arc<Client>, repo: String) {
 	let dialog = Dialog::builder(&parent, &repo).build();
 	let padding = dialog_padding(&dialog);
-	// Each label is made just before its list, so screen readers take it for the list's.
-	let sections_label = StaticText::builder(&dialog).with_label("Sections").build();
-	let sections = ListBox::builder(&dialog).build();
-	for section in Section::ALL {
-		sections.append(section.title());
-	}
-	sections.set_selection(0, true);
-	let commits_label = StaticText::builder(&dialog).with_label(Section::Commits.title()).build();
-	let list = Rc::new(QuietList::new(&dialog, Section::Commits.title()));
+	let sections = SectionedLists::new(&dialog, "Sections", &Section::ALL.map(|section| (section, section.title())));
+	let list = Rc::clone(sections.list(Section::Commits));
 	list.set_min_size(LIST_SIZE);
 	let close_button = Button::builder(&dialog).with_id(ID_CANCEL).with_label("Close").build();
 	dialog.set_escape_id(ID_CANCEL);
@@ -86,17 +80,8 @@ pub fn open_repository<P: WxWidget + WxEvtHandler + Copy + 'static>(parent: P, c
 			}
 		}
 	});
-	let columns = BoxSizer::builder(Orientation::Horizontal).build();
-	let sections_column = BoxSizer::builder(Orientation::Vertical).build();
-	sections_column.add(&sections_label, 0, SizerFlag::empty(), 0);
-	sections_column.add(&sections, 1, SizerFlag::Expand, 0);
-	columns.add_sizer(&sections_column, 1, SizerFlag::Expand | SizerFlag::All, padding);
-	let commits_column = BoxSizer::builder(Orientation::Vertical).build();
-	commits_column.add(&commits_label, 0, SizerFlag::empty(), 0);
-	commits_column.add(&*list, 1, SizerFlag::Expand, 0);
-	columns.add_sizer(&commits_column, 3, SizerFlag::Expand | SizerFlag::All, padding);
 	let content = BoxSizer::builder(Orientation::Vertical).build();
-	content.add_sizer(&columns, 1, SizerFlag::Expand, 0);
+	content.add_sizer(&sections.sizer(3), 1, SizerFlag::Expand, 0);
 	content.add(
 		&close_button,
 		0,
