@@ -11,7 +11,7 @@ use gitview_core::{
 };
 use quiet_list::{QuietList, Select};
 use wx_utils::{
-	dialog_padding, prompt_text, show_error, show_warning,
+	dialog_padding, post_to_ui, prompt_text, show_error, show_warning,
 	tasks::{Queue, background_blocking, spawn_for},
 };
 use wxdragon::{
@@ -142,6 +142,12 @@ impl Default for State {
 	}
 }
 
+thread_local! {
+	/// The main window, for other copies of Gitview to bring forward. Their messages arrive on a
+	/// background thread, which can't hold the window itself.
+	static OPEN_WINDOW: RefCell<Option<MainWindow>> = const { RefCell::new(None) };
+}
+
 /// A view's list of items and the label that names it.
 struct ViewList {
 	label: StaticText,
@@ -167,7 +173,9 @@ pub struct MainWindow {
 }
 
 impl MainWindow {
-	pub fn open() {
+	/// Opens the main window. `door` is where copies of Gitview started later ring, which brings
+	/// this one forward instead.
+	pub fn open(door: Option<doorbell::Door>) {
 		let frame = Frame::builder().with_title("Gitview").with_size(WINDOW_SIZE).build();
 		build_menu_bar(&frame);
 		let panel = Panel::builder(&frame).build();
@@ -202,12 +210,49 @@ impl MainWindow {
 		window.update_actions_menu();
 		frame.show(true);
 		views.set_focus();
+		if let Some(door) = door {
+			OPEN_WINDOW.set(Some(window.clone()));
+			// Gitview opens no files, so whatever another copy was started with, it means "come
+			// forward".
+			door.listen(|_| {
+				post_to_ui(|| {
+					if let Some(window) = OPEN_WINDOW.with_borrow(Clone::clone) {
+						window.come_forward();
+					}
+				});
+			});
+		}
 		spawn_for(&frame, async move {
 			match background_blocking(token::load).await {
 				Some(token) => window.connect(token),
 				None => window.sign_in(),
 			}
 		});
+	}
+
+	/// Brings Gitview to the front for someone who started it again, onto the window they were
+	/// last in, such as an open thread or an error message.
+	fn come_forward(&self) {
+		// Found before the frame is restored or raised, either of which makes the frame the
+		// window last active and hides the dialog the user was in.
+		#[cfg(windows)]
+		let last_active = {
+			use windows::Win32::{Foundation::HWND, UI::WindowsAndMessaging::GetLastActivePopup};
+			let frame = self.frame.get_handle();
+			// SAFETY: `frame` is the live main window's handle. It comes back itself when no
+			// dialog is open.
+			(!frame.is_null()).then(|| unsafe { GetLastActivePopup(HWND(frame)) })
+		};
+		if self.frame.is_iconized() {
+			self.frame.iconize(false);
+		}
+		self.frame.raise();
+		#[cfg(windows)]
+		if let Some(window) = last_active {
+			// SAFETY: a handle Windows just gave out. Windows refuses the foreground to a process
+			// the user isn't using, but the copy that rang allowed it.
+			let _ = unsafe { windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow(window) };
+		}
 	}
 
 	fn bind_events(&self) {
