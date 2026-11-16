@@ -21,7 +21,7 @@ wx-utils = { version = "0.5.2", features = ["tasks"] }
 wxdragon = { version = "0.9.24", features = ["webview"] }
 
 [build-dependencies]
-embed-manifest = "1.5.1"
+shipfitter = { version = "0.2.5", features = ["windows-resources"] }
 
 [lints]
 workspace = true
