@@ -1,7 +1,7 @@
 //! Settings kept between runs, in `gitview.toml`. A portable copy keeps them beside the
 //! executable, and an installed one in the platform's usual folder for them.
 
-use std::{fs, io};
+use std::{collections::BTreeMap, fs, io};
 
 use homeport::Homeport;
 use serde::{Deserialize, Serialize};
@@ -15,6 +15,16 @@ const CONFIG_DIR_VARIABLE: &str = "GITVIEW_CONFIG_DIR";
 #[serde(default)]
 pub struct Config {
 	pub views: Views,
+	pub shortcuts: Shortcuts,
+}
+
+/// The keys bound differently from Gitview's defaults, by action id, written as Gitview shows
+/// them, such as `Ctrl+Alt+G`. `none` leaves an action unbound.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Shortcuts {
+	/// System-wide hotkeys, which work whatever has focus.
+	pub global: BTreeMap<String, String>,
 }
 
 /// Which views the main window lists, as view ids.

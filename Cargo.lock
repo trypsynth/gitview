@@ -1107,6 +1107,7 @@ dependencies = [
  "doorbell",
  "gitview-core",
  "homeport",
+ "key-chord",
  "keyring",
  "live-region",
  "quiet-list",
@@ -1518,6 +1519,12 @@ dependencies = [
  "futures-util",
  "wasm-bindgen",
 ]
+
+[[package]]
+name = "key-chord"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6f0b9fc9ea91fa687a6702b248bae651b2781b173c5b9e41b2a719527c9283c0"
 
 [[package]]
 name = "keyring"
@@ -3389,7 +3396,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3627,8 +3634,10 @@ version = "0.5.2"
 source = "git+https://github.com/accessware/wx-utils?rev=ee936a1#ee936a12af62a392133a4563893d87680e5701c6"
 dependencies = [
  "async-task",
+ "key-chord",
  "patois",
  "tokio",
+ "windows",
  "wxdragon",
 ]
 

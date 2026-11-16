@@ -12,12 +12,13 @@ chrono = { version = "0.4.45", default-features = false, features = ["clock", "s
 doorbell = "0.1.0"
 gitview-core = { path = "../gitview-core" }
 homeport = "0.1.0"
+key-chord = "0.2.2"
 keyring = "4.2.0"
 live-region = "0.3.3"
 quiet-list = "0.1.1"
 serde = { version = "1.0.229", features = ["derive"] }
 toml = "1.2.0"
-wx-utils = { version = "0.5.2", features = ["tasks"] }
+wx-utils = { version = "0.5.2", features = ["global-hotkeys", "tasks"] }
 wxdragon = { version = "0.9.24", features = ["webview"] }
 
 [build-dependencies]

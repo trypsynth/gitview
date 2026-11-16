@@ -9,6 +9,7 @@ use gitview_core::{
 	Client, Error,
 	models::{CloseReason, Issue, IssueState, Notification, Repository},
 };
+use key_chord::KeyChord;
 use quiet_list::{QuietList, Select};
 use wx_utils::{
 	post_to_ui, prompt_text, show_error, show_warning,
@@ -26,6 +27,7 @@ use super::tray::Tray;
 use super::{
 	actions::{self, Action, Marks, Selected},
 	dialogs::{self, Listing},
+	hotkeys::{GlobalAction, Hotkeys},
 	live,
 	sectioned::SectionedLists,
 	text::comment_count,
@@ -153,9 +155,17 @@ impl Default for State {
 }
 
 thread_local! {
-	/// The main window, for other copies of Gitview to bring forward. Their messages arrive on a
-	/// background thread, which can't hold the window itself.
+	/// The main window, for hotkeys and other copies of Gitview. They arrive on background
+	/// threads, which can't hold the window themselves.
 	static OPEN_WINDOW: RefCell<Option<MainWindow>> = const { RefCell::new(None) };
+}
+
+/// Runs `act` on the main window, for what arrives from another thread: a hotkey, or another copy
+/// of Gitview.
+fn with_open_window(act: impl FnOnce(&MainWindow)) {
+	if let Some(window) = OPEN_WINDOW.with_borrow(Clone::clone) {
+		act(&window);
+	}
 }
 
 #[derive(Clone)]
@@ -171,6 +181,7 @@ pub struct MainWindow {
 	visibility: Rc<Visibility>,
 	#[cfg(not(target_os = "macos"))]
 	tray: Rc<Tray>,
+	hotkeys: Rc<Hotkeys>,
 	/// Every change Gitview makes on GitHub goes through here, one at a time, so changes arrive
 	/// in the order the user made them, such as a star and the unstar after it.
 	writes: Queue,
@@ -207,6 +218,7 @@ impl MainWindow {
 			visibility,
 			#[cfg(not(target_os = "macos"))]
 			tray,
+			hotkeys: Rc::default(),
 			writes: Queue::new(),
 			state: Rc::new(RefCell::new(state)),
 		};
@@ -216,16 +228,13 @@ impl MainWindow {
 		window.update_actions_menu();
 		frame.show(true);
 		window.sections.focus_sections();
+		OPEN_WINDOW.set(Some(window.clone()));
+		window.register_hotkeys();
 		if let Some(door) = door {
-			OPEN_WINDOW.set(Some(window.clone()));
 			// Gitview opens no files, so whatever another copy was started with, it means "come
 			// forward".
 			door.listen(|_| {
-				post_to_ui(|| {
-					if let Some(window) = OPEN_WINDOW.with_borrow(Clone::clone) {
-						window.visibility.come_forward();
-					}
-				});
+				post_to_ui(|| with_open_window(|window| window.visibility.come_forward()));
 			});
 		}
 		spawn_for(&frame, async move {
@@ -237,14 +246,16 @@ impl MainWindow {
 	}
 
 	fn bind_events(&self) {
-		// The tray icon would otherwise keep Gitview running once the window is gone.
+		let window = self.clone();
+		self.frame.on_close(move |event| {
+			window.hotkeys.abandon();
+			// The tray icon would otherwise keep Gitview running once the window is gone.
+			#[cfg(not(target_os = "macos"))]
+			window.tray.remove();
+			event.skip(true);
+		});
 		#[cfg(not(target_os = "macos"))]
 		{
-			let tray = Rc::clone(&self.tray);
-			self.frame.on_close(move |event| {
-				tray.remove();
-				event.skip(true);
-			});
 			let window = self.clone();
 			self.tray.on_exit(move || window.exit());
 		}
@@ -298,6 +309,29 @@ impl MainWindow {
 			std::process::exit(0);
 		})
 		.detach();
+	}
+
+	/// Registers the global hotkeys from the settings, and says which keys another program has
+	/// taken.
+	fn register_hotkeys(&self) {
+		let shortcuts = config::load().shortcuts;
+		let taken = self.hotkeys.register(&shortcuts, |action| {
+			post_to_ui(move || with_open_window(|window| window.run_global(action)));
+		});
+		if !taken.is_empty() {
+			let keys: Vec<String> = taken.iter().map(KeyChord::to_shortcut_string).collect();
+			show_warning(
+				&self.frame,
+				format!("Another program already uses {}, so Gitview can't.", keys.join(" and ")),
+				"Hotkey Not Available",
+			);
+		}
+	}
+
+	fn run_global(&self, action: GlobalAction) {
+		match action {
+			GlobalAction::ShowHide => self.visibility.toggle(),
+		}
 	}
 
 	fn connect(&self, token: String) {

@@ -34,6 +34,15 @@ impl Visibility {
 		}
 	}
 
+	/// Hides Gitview when it's what the user is in, and otherwise brings it forward.
+	pub fn toggle(&self) {
+		if self.frame.is_shown() && self.is_active() {
+			self.hide();
+		} else {
+			self.come_forward();
+		}
+	}
+
 	/// Brings Gitview to the front, shown and restored, onto the window the user was last in,
 	/// such as an open thread or an error message.
 	pub fn come_forward(&self) {
@@ -81,6 +90,20 @@ impl Visibility {
 	fn take_hidden_dialog(&self) -> Option<isize> {
 		Some(self.hidden_dialog.replace(0)).filter(|dialog| *dialog != 0)
 	}
+
+	/// Whether the window, or the dialog over it, is the one in front.
+	fn is_active(&self) -> bool {
+		#[cfg(windows)]
+		{
+			win32::foreground().is_some_and(|foreground| {
+				foreground == win32::handle(self.frame) || Some(foreground) == win32::last_active_popup(self.frame)
+			})
+		}
+		#[cfg(not(windows))]
+		{
+			self.frame.has_focus()
+		}
+	}
 }
 
 /// The few Windows calls the rest of this needs, with window handles as plain numbers so they
@@ -90,7 +113,8 @@ mod win32 {
 	use windows::Win32::{
 		Foundation::{HWND, LPARAM, WPARAM},
 		UI::WindowsAndMessaging::{
-			GetLastActivePopup, PostMessageW, SW_HIDE, SW_SHOW, SetForegroundWindow, ShowWindow, WM_CLOSE,
+			GetForegroundWindow, GetLastActivePopup, PostMessageW, SW_HIDE, SW_SHOW, SetForegroundWindow, ShowWindow,
+			WM_CLOSE,
 		},
 	};
 	use wxdragon::prelude::*;
@@ -105,6 +129,12 @@ mod win32 {
 		let frame = handle(frame);
 		// SAFETY: `frame` is the live main window's handle.
 		(frame != 0).then(|| unsafe { GetLastActivePopup(HWND(frame as _)) }.0 as isize)
+	}
+
+	pub fn foreground() -> Option<isize> {
+		// SAFETY: takes nothing and only reads which window is in front.
+		let window = unsafe { GetForegroundWindow() }.0 as isize;
+		(window != 0).then_some(window)
 	}
 
 	/// Asks `window` to close once its event loop gets to it, as its close button would.

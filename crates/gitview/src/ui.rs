@@ -1,5 +1,6 @@
 mod actions;
 mod dialogs;
+mod hotkeys;
 mod live;
 mod main_window;
 mod sectioned;
