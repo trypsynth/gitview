@@ -755,8 +755,7 @@ impl MainWindow {
 		match selected {
 			Selected::Notification(notification) => self.open_notification(client, notification),
 			Selected::Repository(repository) => {
-				let state = self.state.borrow().issue_filter;
-				dialogs::open_issues(self.frame, client, repository.full_name.clone(), state, Listing::Both);
+				dialogs::open_repository(self.frame, client, repository.full_name.clone());
 			}
 			Selected::Issue(_) => {
 				if let Some((repo, number)) = selected.issue() {

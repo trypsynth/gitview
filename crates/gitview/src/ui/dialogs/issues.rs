@@ -18,7 +18,6 @@ const LIST_SIZE: Size = Size { width: 600, height: 400 };
 /// Which of a repository's issues and pull requests to list.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Listing {
-	Both,
 	Issues,
 	PullRequests,
 }
@@ -26,7 +25,6 @@ pub enum Listing {
 impl Listing {
 	const fn title(self) -> &'static str {
 		match self {
-			Self::Both => "Issues and Pull Requests",
 			Self::Issues => "Issues",
 			Self::PullRequests => "Pull Requests",
 		}
@@ -34,7 +32,6 @@ impl Listing {
 
 	const fn includes(self, issue: &Issue) -> bool {
 		match self {
-			Self::Both => true,
 			Self::Issues => !issue.is_pull_request(),
 			Self::PullRequests => issue.is_pull_request(),
 		}

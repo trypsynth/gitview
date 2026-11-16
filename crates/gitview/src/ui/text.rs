@@ -4,7 +4,12 @@ use super::web;
 
 /// "1 comment", not "1 comments".
 pub fn comment_count(comments: u64) -> String {
-	if comments == 1 { "1 comment".to_string() } else { format!("{comments} comments") }
+	count(comments, "comment", "comments")
+}
+
+/// `number` with the word for one or for many after it, such as "1 file" or "3 files".
+pub fn count(number: u64, one: &str, many: &str) -> String {
+	format!("{number} {}", if number == 1 { one } else { many })
 }
 
 /// GitHub's own rendering of a body when the request asked for it, the raw markdown otherwise.
