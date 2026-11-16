@@ -35,7 +35,6 @@ const ID_FILTER_FIRST: i32 = ID_HIGHEST + 10;
 const ACTIONS_MENU: usize = 1;
 const FILTER_MENU: usize = 2;
 const WINDOW_SIZE: Size = Size { width: 800, height: 600 };
-const LOADING: &str = "Loading...";
 /// How often the view on screen is fetched again. GitHub asks clients not to poll the
 /// notifications endpoint more than once a minute.
 const POLL_INTERVAL_MS: i32 = 60_000;
@@ -353,7 +352,6 @@ impl MainWindow {
 		} else {
 			drop(state);
 			self.items.clear();
-			self.items.append(LOADING);
 			self.update_actions_menu();
 			// Startup loads every view, so this only happens when that fetch is still in
 			// flight or failed.
@@ -382,7 +380,6 @@ impl MainWindow {
 			state.selections[view.index()] = 0;
 		}
 		self.items.clear();
-		self.items.append(LOADING);
 		self.update_actions_menu();
 		self.fetch(self.state.borrow().view);
 	}
