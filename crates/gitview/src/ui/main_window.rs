@@ -9,6 +9,7 @@ use gitview_core::{
 	Client, Error,
 	models::{CloseReason, Issue, IssueState, Notification, Repository},
 };
+use quiet_list::{QuietList, Select};
 use wx_utils::{prompt_text, show_error, show_warning};
 use wxdragon::{
 	clipboard::Clipboard,
@@ -40,6 +41,9 @@ const WINDOW_SIZE: Size = Size { width: 800, height: 600 };
 const POLL_INTERVAL_MS: i32 = 60_000;
 /// How long a close or reopen is laid over search results, which usually catch up in seconds.
 const SEARCH_CATCH_UP: Duration = Duration::from_secs(120);
+/// The key of the row a list shows in place of items, such as "No notifications.". It is always
+/// the only row, so it cannot be mistaken for an item's key.
+const MESSAGE_KEY: &str = "";
 
 enum Items {
 	Notifications(Vec<Notification>),
@@ -67,7 +71,7 @@ impl Items {
 }
 
 /// What a view holds once it has been fetched. The labels are kept so a poll that changed
-/// nothing leaves the list alone, rather than rebuilding it under the user's cursor.
+/// nothing leaves the list and the Actions menu alone.
 struct Loaded {
 	items: Items,
 	labels: Vec<String>,
@@ -79,7 +83,6 @@ struct State {
 	arrangement: Vec<(View, bool)>,
 	view: View,
 	loaded: [Option<Loaded>; View::COUNT],
-	selections: [u32; View::COUNT],
 	unread_only: bool,
 	issue_filter: IssueState,
 	/// Set while the sign-in dialog is up, so the five views in flight cannot each raise
@@ -128,7 +131,6 @@ impl Default for State {
 			arrangement: view::arrange(&[], &[]),
 			view: View::Notifications,
 			loaded: [const { None }; View::COUNT],
-			selections: [0; View::COUNT],
 			unread_only: true,
 			issue_filter: IssueState::Open,
 			signing_in: false,
@@ -138,12 +140,20 @@ impl Default for State {
 	}
 }
 
+/// A view's list of items and the label that names it.
+struct ViewList {
+	label: StaticText,
+	list: QuietList<String>,
+}
+
 #[derive(Clone)]
 pub struct MainWindow {
 	frame: Frame,
+	panel: Panel,
 	views: ListBox,
-	items: ListBox,
-	items_label: StaticText,
+	/// Every view's list, by view index, with only the view on screen shown. A list's spoken
+	/// name is fixed when it is made, so each view has one of its own rather than sharing one.
+	lists: Rc<[ViewList; View::COUNT]>,
 	/// A hidden label that speaks through the screen reader, to confirm actions that change
 	/// nothing on screen.
 	live_region: StaticText,
@@ -161,21 +171,25 @@ impl MainWindow {
 		let settings = config::load().views;
 		let arrangement = view::arrange(&settings.order, &settings.hidden);
 		let first = shown(&arrangement)[0];
-		let items_label = StaticText::builder(&panel).with_label(first.title()).build();
-		let items = ListBox::builder(&panel).build();
+		// Each label is made just before its list, so screen readers take it for the list's.
+		let lists = View::ALL.map(|view| {
+			let label = StaticText::builder(&panel).with_label(view.title()).build();
+			ViewList { label, list: QuietList::new(&panel, view.title()) }
+		});
 		// Made after the lists, so no screen reader takes it for one's label.
 		let live_region = live::live_region(&panel);
-		lay_out(panel, [(views_label, views), (items_label, items)]);
+		lay_out(panel, views_label, views, &lists);
 		let state = State { arrangement, view: first, ..State::default() };
 		let window = Self {
 			frame,
+			panel,
 			views,
-			items,
-			items_label,
+			lists: Rc::new(lists),
 			live_region,
 			poll_timer: Rc::new(Timer::new(&frame)),
 			state: Rc::new(RefCell::new(state)),
 		};
+		window.show_only(first);
 		window.fill_views();
 		window.bind_events();
 		window.update_filter_menu();
@@ -213,13 +227,14 @@ impl MainWindow {
 				window.show_view(view);
 			}
 		});
-		let window = self.clone();
-		self.items.on_item_double_clicked(move |_| window.perform(Action::Open));
-		let window = self.clone();
-		self.items.on_selection_changed(move |_| window.update_actions_menu());
-		let window = self.clone();
-		// ListBox has no context menu method of its own, so the event is bound directly.
-		self.items.bind_internal(EventType::CONTEXT_MENU, move |_| window.show_context_menu());
+		for ViewList { list, .. } in self.lists.iter() {
+			let window = self.clone();
+			list.on_activate(move || window.perform(Action::Open));
+			let window = self.clone();
+			list.on_selection_changed(move || window.update_actions_menu());
+			let window = self.clone();
+			list.on_context_menu(move || window.show_context_menu());
+		}
 		let window = self.clone();
 		self.poll_timer.on_tick(move |_| window.fetch_all());
 	}
@@ -289,7 +304,9 @@ impl MainWindow {
 			let arrangement = std::mem::take(&mut state.arrangement);
 			*state = State { arrangement, view: state.view, ..State::default() };
 		}
-		self.items.clear();
+		for view in View::ALL {
+			self.clear(view);
+		}
 		self.sign_in();
 	}
 
@@ -332,31 +349,52 @@ impl MainWindow {
 		}
 	}
 
-	/// Shows a view the user just moved to: its items appear from memory, and a fetch runs
-	/// behind them in case anything changed.
+	/// Shows a view the user just moved to. Its list kept its items and its place while hidden,
+	/// since every fetch fills it.
 	fn show_view(&self, view: View) {
-		{
-			let mut state = self.state.borrow_mut();
-			let previous = state.view.index();
-			state.selections[previous] = self.items.get_selection().unwrap_or(0);
-			state.view = view;
-		}
-		self.items_label.set_label(view.title());
+		self.state.borrow_mut().view = view;
+		self.show_only(view);
 		self.update_filter_menu();
-		let state = self.state.borrow();
-		if let Some(loaded) = state.loaded[view.index()].as_ref() {
-			let labels = loaded.labels.clone();
-			let selection = state.selections[view.index()];
-			drop(state);
-			self.fill(view, &labels, selection);
-		} else {
-			drop(state);
-			self.items.clear();
-			self.update_actions_menu();
-			// Startup loads every view, so this only happens when that fetch is still in
-			// flight or failed.
+		self.update_actions_menu();
+		// Startup loads every view, so this only happens when that fetch is still in flight or
+		// failed.
+		if self.state.borrow().loaded[view.index()].is_none() {
+			self.clear(view);
 			self.fetch(view);
 		}
+	}
+
+	/// Shows `view`'s label and list and hides the others'. Focus in a list being hidden moves to
+	/// the one shown, rather than staying on a control no one can see.
+	fn show_only(&self, view: View) {
+		let had_focus = self.lists.iter().any(|ViewList { list, .. }| list.has_focus());
+		for (index, ViewList { label, list }) in self.lists.iter().enumerate() {
+			let shown = index == view.index();
+			label.show(shown);
+			list.show(shown);
+		}
+		self.panel.layout();
+		if had_focus {
+			self.list(view).set_focus();
+		}
+	}
+
+	fn list(&self, view: View) -> &QuietList<String> {
+		&self.lists[view.index()].list
+	}
+
+	fn current_list(&self) -> &QuietList<String> {
+		self.list(self.state.borrow().view)
+	}
+
+	/// Empties `view`'s list, which is how a view shows that it is loading.
+	fn clear(&self, view: View) {
+		self.list(view).update_labelled(Vec::new(), Select::Start);
+	}
+
+	/// Shows `message` alone in `view`'s list, in place of items.
+	fn show_message(&self, view: View, message: &str) {
+		self.list(view).update_labelled(vec![(MESSAGE_KEY.to_owned(), message.to_owned())], Select::Start);
 	}
 
 	fn set_filter(&self, index: i32) {
@@ -377,11 +415,11 @@ impl MainWindow {
 			// What is held no longer matches the filter, so it cannot stand in while the
 			// new fetch runs.
 			state.loaded[view.index()] = None;
-			state.selections[view.index()] = 0;
 		}
-		self.items.clear();
+		let view = self.state.borrow().view;
+		self.clear(view);
 		self.update_actions_menu();
-		self.fetch(self.state.borrow().view);
+		self.fetch(view);
 	}
 
 	/// Rebuilds the Filter menu for the selected view, since the filters differ per view.
@@ -451,14 +489,15 @@ impl MainWindow {
 			}
 			Err(error) => {
 				// A failed poll leaves whatever the view already holds on screen, and a
-				// view the user is not looking at stays quiet either way.
+				// view the user is not looking at raises no error.
 				let state = self.state.borrow();
 				let (unloaded, current) = (state.loaded[view.index()].is_none(), state.view == view);
 				drop(state);
-				if unloaded && current {
-					self.items.clear();
-					self.items.append("Could not load this view.");
-					show_error(&self.frame, error, "Could Not Load GitHub Data");
+				if unloaded {
+					self.show_message(view, "Could not load this view.");
+					if current {
+						show_error(&self.frame, error, "Could Not Load GitHub Data");
+					}
 				}
 				if current {
 					self.speak_announcement();
@@ -472,29 +511,20 @@ impl MainWindow {
 			IssueChange::apply(&state.issue_changes, issues, state.issue_filter);
 		}
 		let labels = items.labels();
-		let (current_view, unchanged, selection) = {
+		let (current, unchanged) = {
 			let mut state = self.state.borrow_mut();
-			let current = state.view == view;
-			let old = state.loaded[view.index()].as_ref();
-			let unchanged = old.is_some_and(|loaded| loaded.labels == labels);
-			// The cursor stays on the item it was on, even when the fetch moved it.
-			let selection = self.items.get_selection().filter(|_| current).and_then(|index| {
-				let key = old?.items.keys().get(index as usize).copied()?;
-				let moved_to = items.keys().iter().position(|new| *new == key)?;
-				u32::try_from(moved_to).ok()
-			});
-			let selection =
-				selection.or_else(|| self.items.get_selection()).unwrap_or_else(|| state.selections[view.index()]);
-			state.loaded[view.index()] = Some(Loaded { items, labels: labels.clone() });
-			(state.view, unchanged, selection)
+			let unchanged = state.loaded[view.index()]
+				.as_ref()
+				.is_some_and(|loaded| loaded.labels == labels && loaded.items.keys() == items.keys());
+			state.loaded[view.index()] = Some(Loaded { items, labels });
+			(state.view == view, unchanged)
 		};
-		if current_view != view {
-			return;
-		}
 		if !unchanged {
-			self.fill(view, &labels, selection);
+			self.fill(view);
 		}
-		self.speak_announcement();
+		if current {
+			self.speak_announcement();
+		}
 	}
 
 	/// Says what an action did, now that the list it changed is settled.
@@ -505,24 +535,36 @@ impl MainWindow {
 		}
 	}
 
-	fn fill(&self, view: View, labels: &[String], selection: u32) {
-		self.items.clear();
-		for label in labels {
-			self.items.append(label);
-		}
-		if labels.is_empty() {
-			self.items.append(view.empty_message());
-		}
-		self.items.set_selection(selection.min(self.items.get_count() - 1), true);
-		// Setting the selection in code raises no event, so the menu is brought up to date by hand.
+	/// Puts what `view` has loaded in its list, or its message when there is nothing. The cursor
+	/// stays on the item it was on wherever the fetch moved it, and the screen reader says nothing
+	/// until the user moves.
+	fn fill(&self, view: View) {
+		let rows = {
+			let state = self.state.borrow();
+			let Some(loaded) = state.loaded[view.index()].as_ref() else {
+				return;
+			};
+			if loaded.labels.is_empty() {
+				vec![(MESSAGE_KEY.to_owned(), view.empty_message().to_owned())]
+			} else {
+				loaded.items.keys().into_iter().map(str::to_owned).zip(loaded.labels.iter().cloned()).collect()
+			}
+		};
+		self.list(view).update_labelled(rows, Select::Keep);
+		// Even with the cursor where it was, the item under it may offer other actions now, and
+		// the Starred and Watching lists decide what every repository offers.
 		self.update_actions_menu();
 	}
 
-	/// A copy of the selected item, or `None` while the list holds only a message.
+	/// A copy of the selected item, or `None` while the list is empty or holds only a message.
+	/// The item is found by its key rather than its row, so an action can never land on a
+	/// neighbour.
 	fn selected(&self) -> Option<Selected> {
-		let index = self.items.get_selection()? as usize;
+		let key = self.current_list().selected()?;
 		let state = self.state.borrow();
-		Some(match &state.loaded[state.view.index()].as_ref()?.items {
+		let items = &state.loaded[state.view.index()].as_ref()?.items;
+		let index = items.keys().iter().position(|candidate| *candidate == key)?;
+		Some(match items {
 			Items::Notifications(notifications) => Selected::Notification(notifications.get(index)?.clone()),
 			Items::Repositories(repositories) => Selected::Repository(repositories.get(index)?.clone()),
 			Items::Issues(issues) => Selected::Issue(issues.get(index)?.clone()),
@@ -560,7 +602,7 @@ impl MainWindow {
 			return;
 		};
 		let mut menu = actions::menu(Some(&selected), self.marks(&selected));
-		self.items.popup_menu(&mut menu, None);
+		self.current_list().popup_menu(&mut menu);
 		menu.destroy_menu();
 	}
 
@@ -701,9 +743,9 @@ impl MainWindow {
 	}
 
 	fn apply_issue_changes(&self, view: View) {
-		let labels = {
+		{
 			let mut state = self.state.borrow_mut();
-			let State { loaded, issue_changes, issue_filter, view: current, .. } = &mut *state;
+			let State { loaded, issue_changes, issue_filter, .. } = &mut *state;
 			let Some(loaded) = loaded[view.index()].as_mut() else {
 				return;
 			};
@@ -712,13 +754,8 @@ impl MainWindow {
 			};
 			IssueChange::apply(issue_changes, issues, *issue_filter);
 			loaded.labels = loaded.items.labels();
-			if *current != view {
-				return;
-			}
-			loaded.labels.clone()
-		};
-		let selection = self.items.get_selection().unwrap_or(0);
-		self.fill(view, &labels, selection);
+		}
+		self.fill(view);
 	}
 
 	fn announce(&self, message: &str) {
@@ -847,16 +884,21 @@ fn parse_issue_reference(text: &str, repo: &str) -> Option<(String, u64)> {
 }
 
 // Views, then the items in the selected view; opening an item shows what it says in a dialog of
-// its own. Each label sits above its control so screen readers use it as that control's name.
-fn lay_out(panel: Panel, lists: [(StaticText, ListBox); 2]) {
+// its own. Each label sits above its list. Every view's list is in the second column, where only
+// the shown one takes up room.
+fn lay_out(panel: Panel, views_label: StaticText, views: ListBox, lists: &[ViewList]) {
 	let padding = panel.from_dip_int(wx_utils::DIALOG_PADDING);
 	let sizer = BoxSizer::builder(Orientation::Horizontal).build();
-	for (weight, (label, list)) in [1, 2].into_iter().zip(lists) {
-		let column = BoxSizer::builder(Orientation::Vertical).build();
-		column.add(&label, 0, SizerFlag::empty(), 0);
-		column.add(&list, 1, SizerFlag::Expand, 0);
-		sizer.add_sizer(&column, weight, SizerFlag::Expand | SizerFlag::All, padding);
+	let views_column = BoxSizer::builder(Orientation::Vertical).build();
+	views_column.add(&views_label, 0, SizerFlag::empty(), 0);
+	views_column.add(&views, 1, SizerFlag::Expand, 0);
+	sizer.add_sizer(&views_column, 1, SizerFlag::Expand | SizerFlag::All, padding);
+	let items_column = BoxSizer::builder(Orientation::Vertical).build();
+	for ViewList { label, list } in lists {
+		items_column.add(label, 0, SizerFlag::empty(), 0);
+		items_column.add(list, 1, SizerFlag::Expand, 0);
 	}
+	sizer.add_sizer(&items_column, 2, SizerFlag::Expand | SizerFlag::All, padding);
 	panel.set_sizer(sizer, true);
 }
 
