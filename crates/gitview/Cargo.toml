@@ -10,6 +10,7 @@ repository.workspace = true
 [dependencies]
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
 gitview-core = { path = "../gitview-core" }
+homeport = "0.1.0"
 keyring = "4.2.0"
 live-region = "0.3.3"
 quiet-list = "0.1.1"
