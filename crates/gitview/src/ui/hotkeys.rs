@@ -23,6 +23,13 @@ impl GlobalAction {
 		}
 	}
 
+	/// What the Keyboard Shortcuts dialog calls it.
+	pub const fn name(self) -> &'static str {
+		match self {
+			Self::ShowHide => "Show or hide Gitview",
+		}
+	}
+
 	/// Fedra's own is Ctrl+Alt+F, so Gitview's sits beside it.
 	pub fn default_chord(self) -> KeyChord {
 		match self {

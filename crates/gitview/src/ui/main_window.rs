@@ -40,6 +40,8 @@ const ID_REFRESH: i32 = ID_HIGHEST + 2;
 const ID_SIGN_OUT: i32 = ID_HIGHEST + 3;
 const ID_PROFILE: i32 = ID_HIGHEST + 4;
 const ID_SETTINGS: i32 = ID_HIGHEST + 5;
+#[cfg(windows)]
+const ID_SHORTCUTS: i32 = ID_HIGHEST + 6;
 const ID_FILTER_FIRST: i32 = ID_HIGHEST + 10;
 const ACTIONS_MENU: usize = 1;
 const FILTER_MENU: usize = 2;
@@ -229,7 +231,7 @@ impl MainWindow {
 		frame.show(true);
 		window.sections.focus_sections();
 		OPEN_WINDOW.set(Some(window.clone()));
-		window.register_hotkeys();
+		window.register_hotkeys(&config::load().shortcuts);
 		if let Some(door) = door {
 			// Gitview opens no files, so whatever another copy was started with, it means "come
 			// forward".
@@ -264,6 +266,8 @@ impl MainWindow {
 			ID_REFRESH => window.fetch_all(),
 			ID_PROFILE => window.edit_profile(),
 			ID_SETTINGS => window.open_settings(),
+			#[cfg(windows)]
+			ID_SHORTCUTS => window.edit_shortcuts(),
 			ID_SIGN_OUT => window.sign_out(),
 			ID_EXIT => window.frame.close(false),
 			id if (ID_FILTER_FIRST..ID_FILTER_FIRST + 3).contains(&id) => window.set_filter(id - ID_FILTER_FIRST),
@@ -311,21 +315,44 @@ impl MainWindow {
 		.detach();
 	}
 
-	/// Registers the global hotkeys from the settings, and says which keys another program has
-	/// taken.
-	fn register_hotkeys(&self) {
-		let shortcuts = config::load().shortcuts;
-		let taken = self.hotkeys.register(&shortcuts, |action| {
+	/// Registers the global hotkeys in `shortcuts`, and says which keys another program has taken.
+	fn register_hotkeys(&self, shortcuts: &config::Shortcuts) {
+		let taken = self.hotkeys.register(shortcuts, |action| {
 			post_to_ui(move || with_open_window(|window| window.run_global(action)));
 		});
 		if !taken.is_empty() {
 			let keys: Vec<String> = taken.iter().map(KeyChord::to_shortcut_string).collect();
 			show_warning(
 				&self.frame,
-				format!("Another program already uses {}, so Gitview can't.", keys.join(" and ")),
+				format!(
+					"Another program already uses {}, so Gitview can't. You can choose another key in Keyboard \
+					 Shortcuts, in the File menu.",
+					keys.join(" and ")
+				),
 				"Hotkey Not Available",
 			);
 		}
+	}
+
+	/// Lets the user change the global hotkeys, then saves and registers whatever they chose.
+	#[cfg(windows)]
+	fn edit_shortcuts(&self) {
+		let mut config = config::load();
+		let Some(shortcuts) = dialogs::show_shortcuts_dialog(&self.frame, &config.shortcuts) else {
+			return;
+		};
+		if shortcuts == config.shortcuts {
+			return;
+		}
+		config.shortcuts = shortcuts;
+		if let Err(error) = config::save(&config) {
+			show_warning(
+				&self.frame,
+				format!("Gitview could not save your shortcuts, so they will only last until it closes. {error}"),
+				"Shortcuts Not Saved",
+			);
+		}
+		self.register_hotkeys(&config.shortcuts);
 	}
 
 	fn run_global(&self, action: GlobalAction) {
@@ -925,6 +952,13 @@ fn build_menu_bar(frame: &Frame) {
 	file_menu.append(ID_REFRESH, "&Refresh\tF5", "Reload the selected view", ItemKind::Normal);
 	file_menu.append_separator();
 	file_menu.append(ID_SETTINGS, "&Settings...\tCtrl+,", "Choose which views to show", ItemKind::Normal);
+	#[cfg(windows)]
+	file_menu.append(
+		ID_SHORTCUTS,
+		"&Keyboard Shortcuts...",
+		"Change the keys that work from anywhere",
+		ItemKind::Normal,
+	);
 	file_menu.append(ID_PROFILE, "Edit &Profile...", "Change your public GitHub profile", ItemKind::Normal);
 	file_menu.append(ID_SIGN_OUT, "Sign O&ut", "Forget your GitHub sign-in", ItemKind::Normal);
 	file_menu.append(ID_EXIT, "E&xit", "Close Gitview", ItemKind::Normal);

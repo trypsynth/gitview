@@ -3635,6 +3635,7 @@ source = "git+https://github.com/accessware/wx-utils?rev=ee936a1#ee936a12af62a39
 dependencies = [
  "async-task",
  "key-chord",
+ "live-region",
  "patois",
  "tokio",
  "windows",
