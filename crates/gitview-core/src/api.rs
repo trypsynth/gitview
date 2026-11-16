@@ -4,8 +4,8 @@ use ureq::RequestBuilder;
 use crate::{
 	Error,
 	models::{
-		CloseReason, Comment, Email, Issue, IssueState, Notification, Profile, ProfileUpdate, Repository,
-		SocialAccount, SubjectDetails, User,
+		CloseReason, Comment, Commit, CommitDetails, Email, Issue, IssueState, Notification, Profile, ProfileUpdate,
+		Repository, SocialAccount, SubjectDetails, User,
 	},
 };
 
@@ -170,6 +170,20 @@ impl Client {
 	/// Repositories the signed-in user watches, which GitHub calls subscriptions.
 	pub fn watched(&self) -> Result<Vec<Repository>, Error> {
 		self.get("/user/subscriptions?per_page=100")
+	}
+
+	/// The newest commits on the default branch of `repo` (`owner/name`). A repository with no
+	/// commits yet has none, which GitHub answers with a conflict rather than an empty list.
+	pub fn commits(&self, repo: &str) -> Result<Vec<Commit>, Error> {
+		match self.get(&format!("/repos/{repo}/commits?per_page=100")) {
+			Err(Error::Http(ureq::Error::StatusCode(409))) => Ok(Vec::new()),
+			result => result,
+		}
+	}
+
+	/// Commit `sha` in `repo` (`owner/name`), with the files it changed and how.
+	pub fn commit(&self, repo: &str, sha: &str) -> Result<CommitDetails, Error> {
+		self.get(&format!("/repos/{repo}/commits/{sha}"))
 	}
 
 	/// Issues and pull requests in `repo` (`owner/name`), newest first.

@@ -57,6 +57,86 @@ pub struct Repository {
 	pub open_issues_count: u64,
 }
 
+/// A commit as a repository's history lists it.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Commit {
+	pub sha: String,
+	pub html_url: String,
+	pub commit: CommitData,
+	/// The account the commit's author address belongs to, which an address GitHub doesn't know
+	/// leaves out.
+	pub author: Option<User>,
+}
+
+impl Commit {
+	/// The message's first line.
+	#[must_use]
+	pub fn summary(&self) -> &str {
+		self.commit.message.lines().next().unwrap_or_default()
+	}
+
+	/// The message after its first line and the blank line under it, if there is any.
+	#[must_use]
+	pub fn description(&self) -> &str {
+		self.commit.message.split_once('\n').map_or("", |(_, rest)| rest.trim())
+	}
+
+	/// The first seven characters of the hash, as GitHub shows it.
+	#[must_use]
+	pub fn short_sha(&self) -> &str {
+		self.sha.get(..7).unwrap_or(&self.sha)
+	}
+
+	/// The author's GitHub login, or the name in the commit when the address has no account.
+	#[must_use]
+	pub fn author_name(&self) -> &str {
+		self.author.as_ref().map_or(&self.commit.author.name, |user| &user.login)
+	}
+}
+
+/// The commit as git records it, apart from where it sits in the history.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CommitData {
+	pub message: String,
+	pub author: GitAuthor,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct GitAuthor {
+	pub name: String,
+	/// When the change was written, which a rebase keeps.
+	pub date: String,
+}
+
+/// One commit with what it changed.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CommitDetails {
+	#[serde(flatten)]
+	pub commit: Commit,
+	pub stats: CommitStats,
+	pub files: Vec<ChangedFile>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CommitStats {
+	pub additions: u64,
+	pub deletions: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ChangedFile {
+	pub filename: String,
+	/// What happened to it: `added`, `removed`, `modified`, `renamed`, `copied`, `changed` or
+	/// `unchanged`.
+	pub status: String,
+	pub additions: u64,
+	pub deletions: u64,
+	/// The name it had before a rename.
+	pub previous_filename: Option<String>,
+	/// The unified diff of the change, which binary files and very large changes leave out.
+	pub patch: Option<String>,
+}
+
 /// Why an issue was closed, as GitHub records it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CloseReason {
@@ -204,5 +284,40 @@ impl SubjectDetails {
 	#[must_use]
 	pub fn heading(&self) -> Option<&str> {
 		self.title.as_deref().or(self.name.as_deref()).or(self.tag_name.as_deref())
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::{Commit, CommitData, GitAuthor, User};
+
+	fn commit(message: &str, author: Option<&str>) -> Commit {
+		Commit {
+			sha: "1b4b5cf5d990986ea291b4eb45f46e71afbe72b2".to_owned(),
+			html_url: String::new(),
+			commit: CommitData {
+				message: message.to_owned(),
+				author: GitAuthor { name: "Quin Gillespie".to_owned(), date: String::new() },
+			},
+			author: author.map(|login| User { login: login.to_owned(), name: None }),
+		}
+	}
+
+	#[test]
+	fn a_message_splits_into_summary_and_description() {
+		let both = commit("Fix the list\n\nIt lost its place.\nNow it doesn't.\n", None);
+		assert_eq!(both.summary(), "Fix the list");
+		assert_eq!(both.description(), "It lost its place.\nNow it doesn't.");
+		let summary_only = commit("Fix the list", None);
+		assert_eq!(summary_only.summary(), "Fix the list");
+		assert_eq!(summary_only.description(), "");
+		assert_eq!(commit("", None).summary(), "");
+	}
+
+	#[test]
+	fn a_commit_is_named_by_its_short_hash_and_its_author() {
+		assert_eq!(commit("", None).short_sha(), "1b4b5cf");
+		assert_eq!(commit("", Some("trypsynth")).author_name(), "trypsynth");
+		assert_eq!(commit("", None).author_name(), "Quin Gillespie");
 	}
 }
