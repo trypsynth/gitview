@@ -7,7 +7,7 @@ use gitview_core::{
 use wx_utils::{dialog_padding, show_error};
 use wxdragon::prelude::*;
 
-use super::open_issue;
+use super::{open_issue, open_on_enter};
 use crate::ui::{text::comment_count, worker};
 
 const LIST_SIZE: Size = Size { width: 600, height: 400 };
@@ -76,27 +76,20 @@ fn show_issues_dialog(parent: &dyn WxWidget, client: Arc<Client>, repo: String, 
 	list.set_selection(0, true);
 	let close_button = Button::builder(&dialog).with_id(ID_CANCEL).with_label("Close").build();
 	dialog.set_escape_id(ID_CANCEL);
-	let button_row = BoxSizer::builder(Orientation::Horizontal).build();
-	// Nothing to open, so the button would only be a dead tab stop.
-	if !issues.is_empty() {
-		let open_button = Button::builder(&dialog).with_label("&Open").build();
-		open_button.set_default();
-		let open_selected = Rc::new(move || {
-			if let Some(issue) = list.get_selection().and_then(|index| issues.get(index as usize)) {
-				open_issue(dialog, Arc::clone(&client), repo.clone(), issue.number);
-			}
-		});
-		let open_on_click = Rc::clone(&open_selected);
-		open_button.on_click(move |_| open_on_click());
-		list.on_item_double_clicked(move |_| open_selected());
-		button_row.add(&open_button, 0, SizerFlag::Right, padding);
-	}
-	button_row.add(&close_button, 0, SizerFlag::empty(), 0);
+	// Enter or a double-click on an issue opens its thread.
+	let open_selected = Rc::new(move || {
+		if let Some(issue) = list.get_selection().and_then(|index| issues.get(index as usize)) {
+			open_issue(dialog, Arc::clone(&client), repo.clone(), issue.number);
+		}
+	});
+	let open_on_double_click = Rc::clone(&open_selected);
+	list.on_item_double_clicked(move |_| open_on_double_click());
+	open_on_enter(dialog, list, move || open_selected());
 	let content = BoxSizer::builder(Orientation::Vertical).build();
 	content.add(&label, 0, SizerFlag::Left | SizerFlag::Right | SizerFlag::Top, padding);
 	content.add(&list, 1, SizerFlag::Expand | SizerFlag::All, padding);
-	content.add_sizer(
-		&button_row,
+	content.add(
+		&close_button,
 		0,
 		SizerFlag::AlignRight | SizerFlag::Left | SizerFlag::Right | SizerFlag::Bottom,
 		padding,

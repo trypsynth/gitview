@@ -11,7 +11,7 @@ use wxdragon::{
 	utils::{BrowserLaunchFlags, launch_default_browser},
 };
 
-use super::{comment::post_comment, page::show_page};
+use super::{comment::post_comment, open_on_enter, page::show_page};
 use crate::ui::{
 	live,
 	text::{body_html, comment_count, local_time},
@@ -132,11 +132,8 @@ fn show_thread_dialog(parent: &dyn WxWidget, client: Arc<Client>, repo: String, 
 	}
 	list.set_selection(0, true);
 	let posts = Rc::new(RefCell::new(posts));
-	// Open is the default button, so Enter on a post shows it formatted.
-	let open_button = Button::builder(&dialog).with_label("&Open").build();
 	let comment_button = Button::builder(&dialog).with_label("&Comment...").build();
 	let close_button = Button::builder(&dialog).with_id(ID_CANCEL).with_label("Close").build();
-	open_button.set_default();
 	dialog.set_escape_id(ID_CANCEL);
 	// Handlers get a copy of the post, since replying opens a dialog, and a comment finishing
 	// meanwhile adds to the list.
@@ -162,15 +159,14 @@ fn show_thread_dialog(parent: &dyn WxWidget, client: Arc<Client>, repo: String, 
 			list.set_focus();
 		});
 	};
-	let open_on_click = open_post.clone();
-	open_button.on_click(move |_| open_on_click());
+	// Enter or a double-click on a post shows it formatted.
+	open_on_enter(dialog, list, open_post.clone());
 	let open_on_double_click = open_post.clone();
 	list.on_item_double_clicked(move |_| open_on_double_click());
 	let comment_reply = reply.clone();
 	comment_button.on_click(move |_| comment_reply(String::new()));
 	bind_post_menu(list, live_region, selected_post, open_post, reply);
 	let button_row = BoxSizer::builder(Orientation::Horizontal).build();
-	button_row.add(&open_button, 0, SizerFlag::Right, padding);
 	button_row.add(&comment_button, 0, SizerFlag::empty(), 0);
 	button_row.add_stretch_spacer(1);
 	button_row.add(&close_button, 0, SizerFlag::empty(), 0);
