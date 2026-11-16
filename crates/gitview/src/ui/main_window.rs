@@ -12,7 +12,7 @@ use gitview_core::{
 use key_chord::KeyChord;
 use quiet_list::{QuietList, Select};
 use wx_utils::{
-	post_to_ui, prompt_text, show_error, show_warning,
+	post_to_ui, prompt_text, show_error,
 	tasks::{Queue, background_blocking, sleep, spawn_for, spawn_local},
 };
 use wxdragon::{
@@ -34,7 +34,7 @@ use super::{
 	view::{self, View},
 	visibility::Visibility,
 };
-use crate::{config, token};
+use crate::{config, token, ui::notice};
 
 const ID_REFRESH: i32 = ID_HIGHEST + 2;
 const ID_SIGN_OUT: i32 = ID_HIGHEST + 3;
@@ -236,7 +236,10 @@ impl MainWindow {
 			// Gitview opens no files, so whatever another copy was started with, it means "come
 			// forward".
 			door.listen(|_| {
-				post_to_ui(|| with_open_window(|window| window.visibility.come_forward()));
+				post_to_ui(|| {
+					tracing::info!("another copy was started, so coming forward");
+					with_open_window(|window| window.visibility.come_forward());
+				});
 			});
 		}
 		spawn_for(&frame, async move {
@@ -309,6 +312,7 @@ impl MainWindow {
 			}
 			// A dialog that won't close, such as a question with no Cancel, can't keep Gitview
 			// running after the user asked it to stop.
+			tracing::warn!("a dialog wouldn't close, so exiting without closing the window");
 			window.tray.remove();
 			std::process::exit(0);
 		})
@@ -320,9 +324,14 @@ impl MainWindow {
 		let taken = self.hotkeys.register(shortcuts, |action| {
 			post_to_ui(move || with_open_window(|window| window.run_global(action)));
 		});
+		for action in GlobalAction::ALL {
+			if let Some(chord) = action.chord(shortcuts).filter(|chord| !taken.contains(chord)) {
+				tracing::info!(action = action.id(), key = %chord.to_shortcut_string(), "hotkey registered");
+			}
+		}
 		if !taken.is_empty() {
 			let keys: Vec<String> = taken.iter().map(KeyChord::to_shortcut_string).collect();
-			show_warning(
+			notice::warning(
 				&self.frame,
 				format!(
 					"Another program already uses {}, so Gitview can't. You can choose another key in Keyboard \
@@ -345,8 +354,9 @@ impl MainWindow {
 			return;
 		}
 		config.shortcuts = shortcuts;
+		tracing::info!("shortcuts changed");
 		if let Err(error) = config::save(&config) {
-			show_warning(
+			notice::warning(
 				&self.frame,
 				format!("Gitview could not save your shortcuts, so they will only last until it closes. {error}"),
 				"Shortcuts Not Saved",
@@ -356,12 +366,14 @@ impl MainWindow {
 	}
 
 	fn run_global(&self, action: GlobalAction) {
+		tracing::debug!(action = action.id(), "hotkey pressed");
 		match action {
 			GlobalAction::ShowHide => self.visibility.toggle(),
 		}
 	}
 
 	fn connect(&self, token: String) {
+		tracing::info!("signed in");
 		self.state.borrow_mut().client = Some(Arc::new(Client::new(token)));
 		self.fetch_all();
 		self.poll_timer.start(POLL_INTERVAL_MS, false);
@@ -375,6 +387,7 @@ impl MainWindow {
 		let token = dialogs::show_sign_in_dialog(&self.frame);
 		self.state.borrow_mut().signing_in = false;
 		let Some(token) = token else {
+			tracing::info!("sign-in cancelled, so closing");
 			self.frame.close(true);
 			return;
 		};
@@ -384,7 +397,7 @@ impl MainWindow {
 
 	fn save_token(&self, token: &str) {
 		if let Err(error) = token::save(token) {
-			show_warning(
+			notice::warning(
 				&self.frame,
 				format!("Gitview could not save your sign-in, so you will need to sign in again next time. {error}"),
 				"Sign-In Not Saved",
@@ -418,6 +431,7 @@ impl MainWindow {
 	}
 
 	fn sign_out(&self) {
+		tracing::info!("signing out");
 		self.poll_timer.stop();
 		token::delete();
 		{
@@ -442,8 +456,9 @@ impl MainWindow {
 			order: arrangement.iter().map(|(view, _)| view.id().to_owned()).collect(),
 			hidden: arrangement.iter().filter(|(_, shown)| !shown).map(|(view, _)| view.id().to_owned()).collect(),
 		};
+		tracing::info!(order = ?config.views.order, hidden = ?config.views.hidden, "views changed");
 		if let Err(error) = config::save(&config) {
-			show_warning(
+			notice::warning(
 				&self.frame,
 				format!("Gitview could not save your settings, so they will only last until it closes. {error}"),
 				"Settings Not Saved",
@@ -576,6 +591,7 @@ impl MainWindow {
 		let mut items = match result {
 			Ok(items) => items,
 			Err(Error::Unauthorized) => {
+				tracing::warn!(view = view.id(), "GitHub no longer accepts the saved sign-in");
 				token::delete();
 				self.sign_in();
 				return;
@@ -586,10 +602,14 @@ impl MainWindow {
 				let state = self.state.borrow();
 				let (unloaded, current) = (state.loaded[view.index()].is_none(), state.view == view);
 				drop(state);
+				// The view on screen says so in a dialog, which logs it too.
+				if !(unloaded && current) {
+					tracing::warn!(view = view.id(), %error, "couldn't load");
+				}
 				if unloaded {
 					self.show_message(view, "Could not load this view.");
 					if current {
-						show_error(&self.frame, error, "Could Not Load GitHub Data");
+						notice::error(&self.frame, error, "Could Not Load GitHub Data");
 					}
 				}
 				if current {
@@ -604,6 +624,7 @@ impl MainWindow {
 			IssueChange::apply(&state.issue_changes, issues, state.issue_filter);
 		}
 		let labels = items.labels();
+		tracing::debug!(view = view.id(), items = labels.len(), "loaded");
 		let (current, unchanged) = {
 			let mut state = self.state.borrow_mut();
 			let unchanged = state.loaded[view.index()]
@@ -781,7 +802,7 @@ impl MainWindow {
 					if Clipboard::get().set_text(url) {
 						window.announce("Link copied.");
 					} else {
-						show_error(&window.frame, "Gitview couldn't copy the link.", "Could Not Copy");
+						notice::error(&window.frame, "Gitview couldn't copy the link.", "Could Not Copy");
 					}
 				});
 			}
@@ -821,6 +842,7 @@ impl MainWindow {
 		spawn_for(&self.frame, async move {
 			match made.await {
 				Ok(()) => {
+					tracing::info!("{message}");
 					window.state.borrow_mut().announcement = Some(message);
 					if let Some(change) = issue_change {
 						window.state.borrow_mut().issue_changes.push(change);
@@ -832,7 +854,7 @@ impl MainWindow {
 					}
 					window.fetch_all();
 				}
-				Err(error) => show_error(&window.frame, error, "GitHub Did Not Make the Change"),
+				Err(error) => notice::error(&window.frame, error, "GitHub Did Not Make the Change"),
 			}
 		});
 	}
@@ -899,14 +921,14 @@ impl MainWindow {
 		}
 		let frame = self.frame;
 		let Some(subject_url) = subject_url else {
-			show_error(&frame, "GitHub gives no link for this notification.", "No Link");
+			notice::error(&frame, "GitHub gives no link for this notification.", "No Link");
 			return;
 		};
 		spawn_for(&frame, async move {
 			match background_blocking(move || client.subject(&subject_url)).await.map(|details| details.html_url) {
 				Ok(Some(url)) => use_link(&url),
-				Ok(None) => show_error(&frame, "GitHub gives no link for this notification.", "No Link"),
-				Err(error) => show_error(&frame, error, "Could Not Get the Link"),
+				Ok(None) => notice::error(&frame, "GitHub gives no link for this notification.", "No Link"),
+				Err(error) => notice::error(&frame, error, "Could Not Get the Link"),
 			}
 		});
 	}

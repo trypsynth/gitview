@@ -266,6 +266,8 @@ impl Client {
 	}
 
 	fn fetch<T: DeserializeOwned>(&self, path: &str, accept: &str) -> Result<T, Error> {
+		// The path alone: the token travels in a header, never in it.
+		tracing::debug!(path, "fetching");
 		Ok(self
 			.authorize(self.agent.get(format!("{API_URL}{path}")))
 			.header("Accept", accept)

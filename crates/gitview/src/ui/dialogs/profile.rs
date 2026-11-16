@@ -5,10 +5,12 @@ use gitview_core::{
 	models::{Profile, ProfileUpdate},
 };
 use wx_utils::{
-	confirm, dialog_padding, show_error,
+	confirm, dialog_padding,
 	tasks::{background_blocking, spawn_for},
 };
 use wxdragon::prelude::*;
+
+use crate::ui::notice;
 
 const TITLE: &str = "Edit Profile";
 const HIDE_EMAIL: &str = "Don't show my email address";
@@ -44,7 +46,7 @@ pub fn edit_profile<P: WxWidget + WxEvtHandler + Copy + 'static>(
 					reauthorize();
 				}
 			}
-			Err(error) => show_error(&parent, error, "Could Not Load Profile"),
+			Err(error) => notice::error(&parent, error, "Could Not Load Profile"),
 		}
 	});
 }
@@ -139,7 +141,7 @@ fn show_profile_dialog(parent: &dyn WxWidget, client: Arc<Client>, loaded: Loade
 			match background_blocking(move || save(&client, &update, &removed, &added)).await {
 				Ok(()) => dialog.end_modal(ID_OK),
 				Err(error) => {
-					show_error(&dialog, error, "Could Not Save Profile");
+					notice::error(&dialog, error, "Could Not Save Profile");
 					save_button.enable(true);
 				}
 			}

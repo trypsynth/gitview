@@ -5,13 +5,13 @@ use gitview_core::{
 	models::{Issue, IssueState},
 };
 use wx_utils::{
-	dialog_padding, show_error,
+	dialog_padding,
 	tasks::{background_blocking, spawn_for},
 };
 use wxdragon::prelude::*;
 
 use super::{open_issue, open_on_enter};
-use crate::ui::text::comment_count;
+use crate::ui::{notice, text::comment_count};
 
 const LIST_SIZE: Size = Size { width: 600, height: 400 };
 
@@ -55,7 +55,7 @@ pub fn open_issues<P: WxWidget + WxEvtHandler + Copy + 'static>(
 				let issues = issues.into_iter().filter(|issue| listing.includes(issue)).collect();
 				show_issues_dialog(&parent, client, repo, listing, issues);
 			}
-			Err(error) => show_error(&parent, error, "Could Not Load Issues"),
+			Err(error) => notice::error(&parent, error, "Could Not Load Issues"),
 		}
 	});
 }

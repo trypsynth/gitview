@@ -9,7 +9,7 @@ use std::{
 
 use gitview_core::auth;
 use wx_utils::{
-	dialog_padding, show_error,
+	dialog_padding,
 	tasks::{background_blocking, spawn_for},
 };
 use wxdragon::{
@@ -18,6 +18,8 @@ use wxdragon::{
 	utils::{BrowserLaunchFlags, launch_default_browser},
 };
 
+use crate::ui::notice;
+
 const TITLE: &str = "Sign In to GitHub";
 
 /// Returns the new access token, or `None` when the user cancels or sign-in fails.
@@ -25,7 +27,7 @@ pub fn show_sign_in_dialog(parent: &dyn WxWidget) -> Option<String> {
 	let code = match auth::request_device_code() {
 		Ok(code) => code,
 		Err(error) => {
-			show_error(parent, error, TITLE);
+			notice::error(parent, error, TITLE);
 			return None;
 		}
 	};
@@ -71,7 +73,7 @@ pub fn show_sign_in_dialog(parent: &dyn WxWidget) -> Option<String> {
 				dialog.end_modal(ID_OK);
 			}
 			Err(error) => {
-				show_error(&dialog, error, TITLE);
+				notice::error(&dialog, error, TITLE);
 				dialog.end_modal(ID_CANCEL);
 			}
 		}

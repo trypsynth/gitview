@@ -3,6 +3,7 @@ mod dialogs;
 mod hotkeys;
 mod live;
 mod main_window;
+mod notice;
 mod sectioned;
 mod text;
 #[cfg(not(target_os = "macos"))]

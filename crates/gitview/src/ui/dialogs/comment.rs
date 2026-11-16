@@ -2,10 +2,12 @@ use std::sync::Arc;
 
 use gitview_core::{Client, models::Comment};
 use wx_utils::{
-	add_ok_cancel_footer, build_ok_cancel_buttons, dialog_padding, show_error,
+	add_ok_cancel_footer, build_ok_cancel_buttons, dialog_padding,
 	tasks::{background_blocking, spawn_for},
 };
 use wxdragon::prelude::*;
+
+use crate::ui::notice;
 
 const COMMENT_SIZE: Size = Size { width: 500, height: 200 };
 
@@ -30,7 +32,7 @@ pub fn post_comment<P: WxWidget + WxEvtHandler + Copy + 'static>(
 					return;
 				}
 				Err(error) => {
-					show_error(&parent, error, "Could Not Post Comment");
+					notice::error(&parent, error, "Could Not Post Comment");
 					text = body;
 				}
 			}

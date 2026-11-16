@@ -15,9 +15,11 @@ homeport = "0.1.0"
 key-chord = "0.2.2"
 keyring = "4.2.0"
 live-region = "0.3.3"
+logkeeper = "0.1.0"
 quiet-list = "0.1.1"
 serde = { version = "1.0.229", features = ["derive"] }
 toml = "1.2.0"
+tracing = "0.1.44"
 wx-utils = { version = "0.5.2", features = ["global-hotkeys", "shortcuts", "tasks"] }
 wxdragon = { version = "0.9.24", features = ["webview"] }
 

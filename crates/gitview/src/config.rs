@@ -1,21 +1,33 @@
 //! Settings kept between runs, in `gitview.toml`. A portable copy keeps them beside the
 //! executable, and an installed one in the platform's usual folder for them.
 
-use std::{collections::BTreeMap, fs, io};
+use std::{collections::BTreeMap, fs, io, path::PathBuf};
 
 use homeport::Homeport;
+use logkeeper::Level;
 use serde::{Deserialize, Serialize};
 
 const FILE_NAME: &str = "gitview.toml";
 /// When set, names the folder settings go in, whatever the install, such as to try a second
 /// copy with settings of its own.
 const CONFIG_DIR_VARIABLE: &str = "GITVIEW_CONFIG_DIR";
+/// Startup, sign-in, the changes the user makes and every problem, without a line per request.
+pub const DEFAULT_LOG_LEVEL: Level = Level::Info;
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
 	pub views: Views,
 	pub shortcuts: Shortcuts,
+	/// How much goes in the log, by logkeeper's names for its levels, such as `debug`.
+	pub log_level: Option<String>,
+}
+
+impl Config {
+	/// The log level in the settings, or info when they don't name one Gitview knows.
+	pub fn log_level(&self) -> Level {
+		self.log_level.as_deref().and_then(|level| level.parse().ok()).unwrap_or(DEFAULT_LOG_LEVEL)
+	}
 }
 
 /// The keys bound differently from Gitview's defaults, by action id, written as Gitview shows
@@ -49,6 +61,11 @@ pub fn save(config: &Config) -> io::Result<()> {
 	let path = home().create_config_dir()?.join(FILE_NAME);
 	let text = toml::to_string_pretty(config).map_err(io::Error::other)?;
 	fs::write(path, text)
+}
+
+/// The folder this copy of Gitview keeps its settings in, and its log beside them.
+pub fn folder() -> PathBuf {
+	home().config_dir()
 }
 
 /// Where this copy of Gitview keeps its settings. Linux keeps the lowercase folder name it has

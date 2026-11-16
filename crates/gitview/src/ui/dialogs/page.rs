@@ -2,12 +2,12 @@ use std::sync::Arc;
 
 use gitview_core::Client;
 use wx_utils::{
-	add_single_button_footer, dialog_padding, show_error,
+	add_single_button_footer, dialog_padding,
 	tasks::{background_blocking, spawn_for},
 };
 use wxdragon::prelude::*;
 
-use crate::ui::{text::body_html, web};
+use crate::ui::{notice, text::body_html, web};
 
 const PAGE_SIZE: Size = Size { width: 700, height: 500 };
 
@@ -30,7 +30,7 @@ pub fn open_subject<P: WxWidget + WxEvtHandler + Copy + 'static>(
 				let body = body_html(details.body_html.as_deref(), details.body.as_deref());
 				show_page(&parent, &heading, &meta, &body);
 			}
-			Err(error) => show_error(&parent, error, "Could Not Open Notification"),
+			Err(error) => notice::error(&parent, error, "Could Not Open Notification"),
 		}
 	});
 }

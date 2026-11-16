@@ -5,7 +5,7 @@ use gitview_core::{
 	models::{Comment, Issue},
 };
 use wx_utils::{
-	dialog_padding, show_error,
+	dialog_padding,
 	tasks::{background_blocking, spawn_for},
 };
 use wxdragon::{
@@ -16,7 +16,7 @@ use wxdragon::{
 
 use super::{comment::post_comment, open_on_enter, page::show_page};
 use crate::ui::{
-	live,
+	live, notice,
 	text::{body_html, comment_count, local_time},
 };
 
@@ -113,7 +113,7 @@ pub fn open_issue<P: WxWidget + WxEvtHandler + Copy + 'static>(
 		};
 		match fetched {
 			Ok((issue, comments)) => show_thread_dialog(&parent, client, repo, &issue, &comments),
-			Err(error) => show_error(&parent, error, "Could Not Open Issue"),
+			Err(error) => notice::error(&parent, error, "Could Not Open Issue"),
 		}
 	});
 }

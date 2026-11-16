@@ -13,13 +13,14 @@ use gitview_core::{
 };
 use quiet_list::{QuietList, Select};
 use wx_utils::{
-	dialog_padding, show_error,
+	dialog_padding,
 	tasks::{background_blocking, spawn_for},
 };
 use wxdragon::prelude::*;
 
 use super::{is_plain_enter, page::show_page};
 use crate::ui::{
+	notice,
 	sectioned::SectionedLists,
 	text::{count, local_time},
 	web,
@@ -76,7 +77,7 @@ pub fn open_repository<P: WxWidget + WxEvtHandler + Copy + 'static>(parent: P, c
 					vec![(MESSAGE_KEY.to_owned(), "Could not load commits.".to_owned())],
 					Select::Start,
 				);
-				show_error(&dialog, error, "Could Not Load Commits");
+				notice::error(&dialog, error, "Could Not Load Commits");
 			}
 		}
 	});
@@ -136,7 +137,7 @@ fn open_commit(dialog: Dialog, client: Arc<Client>, repo: String, sha: String) {
 				let meta = format!("{} committed on {}", commit.author_name(), local_time(&commit.commit.author.date));
 				show_page(&dialog, commit.summary(), &meta, &commit_page(&details));
 			}
-			Err(error) => show_error(&dialog, error, "Could Not Open Commit"),
+			Err(error) => notice::error(&dialog, error, "Could Not Open Commit"),
 		}
 	});
 }
