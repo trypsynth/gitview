@@ -22,3 +22,8 @@ opt-level = "z"
 lto = true
 panic = "abort"
 codegen-units = 1
+
+# Until a wxDragon release has Event::event_object_ptr, which wx-utils' tasks need.
+[patch.crates-io]
+wx-utils = { git = "https://github.com/accessware/wx-utils", rev = "ee936a1" }
+wxdragon = { git = "https://github.com/AllenDang/wxDragon", rev = "1d56121" }

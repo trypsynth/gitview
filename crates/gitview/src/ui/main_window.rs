@@ -10,7 +10,7 @@ use gitview_core::{
 	models::{CloseReason, Issue, IssueState, Notification, Repository},
 };
 use quiet_list::{QuietList, Select};
-use wx_utils::{prompt_text, show_error, show_warning};
+use wx_utils::{dialog_padding, prompt_text, show_error, show_warning};
 use wxdragon::{
 	clipboard::Clipboard,
 	prelude::*,
@@ -887,7 +887,7 @@ fn parse_issue_reference(text: &str, repo: &str) -> Option<(String, u64)> {
 // its own. Each label sits above its list. Every view's list is in the second column, where only
 // the shown one takes up room.
 fn lay_out(panel: Panel, views_label: StaticText, views: ListBox, lists: &[ViewList]) {
-	let padding = panel.from_dip_int(wx_utils::DIALOG_PADDING);
+	let padding = dialog_padding(&panel);
 	let sizer = BoxSizer::builder(Orientation::Horizontal).build();
 	let views_column = BoxSizer::builder(Orientation::Vertical).build();
 	views_column.add(&views_label, 0, SizerFlag::empty(), 0);

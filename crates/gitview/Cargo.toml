@@ -16,7 +16,7 @@ live-region = "0.3.3"
 quiet-list = "0.1.1"
 serde = { version = "1.0.229", features = ["derive"] }
 toml = "1.2.0"
-wx-utils = "0.4.4"
+wx-utils = { version = "0.5.2", features = ["tasks"] }
 wxdragon = { version = "0.9.24", features = ["webview"] }
 
 [build-dependencies]
