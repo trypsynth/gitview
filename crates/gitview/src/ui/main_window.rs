@@ -12,7 +12,7 @@ use gitview_core::{
 use quiet_list::{QuietList, Select};
 use wx_utils::{
 	post_to_ui, prompt_text, show_error, show_warning,
-	tasks::{Queue, background_blocking, spawn_for},
+	tasks::{Queue, background_blocking, sleep, spawn_for, spawn_local},
 };
 use wxdragon::{
 	clipboard::Clipboard,
@@ -21,6 +21,8 @@ use wxdragon::{
 	utils::{BrowserLaunchFlags, launch_default_browser},
 };
 
+#[cfg(not(target_os = "macos"))]
+use super::tray::Tray;
 use super::{
 	actions::{self, Action, Marks, Selected},
 	dialogs::{self, Listing},
@@ -28,6 +30,7 @@ use super::{
 	sectioned::SectionedLists,
 	text::comment_count,
 	view::{self, View},
+	visibility::Visibility,
 };
 use crate::{config, token};
 
@@ -44,6 +47,12 @@ const WINDOW_SIZE: Size = Size { width: 800, height: 600 };
 const POLL_INTERVAL_MS: i32 = 60_000;
 /// How long a close or reopen is laid over search results, which usually catch up in seconds.
 const SEARCH_CATCH_UP: Duration = Duration::from_secs(120);
+/// How many dialogs Exit closes before giving up on closing them one by one.
+#[cfg(not(target_os = "macos"))]
+const EXIT_TRIES: u32 = 20;
+/// How long Exit lets a dialog take to close before asking the next.
+#[cfg(not(target_os = "macos"))]
+const EXIT_WAIT: Duration = Duration::from_millis(100);
 /// The key of the row a list shows in place of items, such as "No notifications.". It is always
 /// the only row, so it cannot be mistaken for an item's key.
 const MESSAGE_KEY: &str = "";
@@ -159,6 +168,9 @@ pub struct MainWindow {
 	/// nothing on screen.
 	live_region: StaticText,
 	poll_timer: Rc<Timer<Frame>>,
+	visibility: Rc<Visibility>,
+	#[cfg(not(target_os = "macos"))]
+	tray: Rc<Tray>,
 	/// Every change Gitview makes on GitHub goes through here, one at a time, so changes arrive
 	/// in the order the user made them, such as a star and the unstar after it.
 	writes: Queue,
@@ -181,11 +193,20 @@ impl MainWindow {
 		let live_region = live::live_region(&panel);
 		panel.set_sizer(sections.sizer(2), true);
 		let state = State { arrangement, view: first, ..State::default() };
+		let visibility = Rc::new(Visibility::new(frame));
+		#[cfg(not(target_os = "macos"))]
+		let tray = {
+			let (toggling, bringing) = (Rc::clone(&visibility), Rc::clone(&visibility));
+			Rc::new(Tray::install(move || toggling.show_or_hide(), move || bringing.come_forward()))
+		};
 		let window = Self {
 			frame,
 			sections,
 			live_region,
 			poll_timer: Rc::new(Timer::new(&frame)),
+			visibility,
+			#[cfg(not(target_os = "macos"))]
+			tray,
 			writes: Queue::new(),
 			state: Rc::new(RefCell::new(state)),
 		};
@@ -202,7 +223,7 @@ impl MainWindow {
 			door.listen(|_| {
 				post_to_ui(|| {
 					if let Some(window) = OPEN_WINDOW.with_borrow(Clone::clone) {
-						window.come_forward();
+						window.visibility.come_forward();
 					}
 				});
 			});
@@ -215,32 +236,18 @@ impl MainWindow {
 		});
 	}
 
-	/// Brings Gitview to the front for someone who started it again, onto the window they were
-	/// last in, such as an open thread or an error message.
-	fn come_forward(&self) {
-		// Found before the frame is restored or raised, either of which makes the frame the
-		// window last active and hides the dialog the user was in.
-		#[cfg(windows)]
-		let last_active = {
-			use windows::Win32::{Foundation::HWND, UI::WindowsAndMessaging::GetLastActivePopup};
-			let frame = self.frame.get_handle();
-			// SAFETY: `frame` is the live main window's handle. It comes back itself when no
-			// dialog is open.
-			(!frame.is_null()).then(|| unsafe { GetLastActivePopup(HWND(frame)) })
-		};
-		if self.frame.is_iconized() {
-			self.frame.iconize(false);
-		}
-		self.frame.raise();
-		#[cfg(windows)]
-		if let Some(window) = last_active {
-			// SAFETY: a handle Windows just gave out. Windows refuses the foreground to a process
-			// the user isn't using, but the copy that rang allowed it.
-			let _ = unsafe { windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow(window) };
-		}
-	}
-
 	fn bind_events(&self) {
+		// The tray icon would otherwise keep Gitview running once the window is gone.
+		#[cfg(not(target_os = "macos"))]
+		{
+			let tray = Rc::clone(&self.tray);
+			self.frame.on_close(move |event| {
+				tray.remove();
+				event.skip(true);
+			});
+			let window = self.clone();
+			self.tray.on_exit(move || window.exit());
+		}
 		let window = self.clone();
 		self.frame.on_menu_selected(move |event| match event.get_id() {
 			ID_REFRESH => window.fetch_all(),
@@ -267,6 +274,30 @@ impl MainWindow {
 		}
 		let window = self.clone();
 		self.poll_timer.on_tick(move |_| window.fetch_all());
+	}
+
+	/// Closes Gitview from the tray, where a dialog may still be open. Closing the window under a
+	/// dialog's own event loop trips wxWidgets, so each dialog is closed first, innermost out, as
+	/// Escape would close it.
+	#[cfg(not(target_os = "macos"))]
+	fn exit(&self) {
+		let window = self.clone();
+		spawn_local(async move {
+			for _ in 0..EXIT_TRIES {
+				if !window.visibility.close_dialog() {
+					window.frame.close(true);
+					return;
+				}
+				// The dialog's event loop ends, and the code that showed it finishes, before the
+				// next one is asked.
+				sleep(EXIT_WAIT).await;
+			}
+			// A dialog that won't close, such as a question with no Cancel, can't keep Gitview
+			// running after the user asked it to stop.
+			window.tray.remove();
+			std::process::exit(0);
+		})
+		.detach();
 	}
 
 	fn connect(&self, token: String) {
