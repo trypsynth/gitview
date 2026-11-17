@@ -195,7 +195,6 @@ fn profile_rows(profile: &UserProfile) -> Rows {
 	add("following", format!("Following: {}", profile.following));
 	add("repositories", format!("Public repositories: {}", profile.public_repos));
 	add("joined", format!("Joined {}", local_time(&profile.created_at)));
-	add(&profile.html_url, "Profile on GitHub".to_owned());
 	rows
 }
 
