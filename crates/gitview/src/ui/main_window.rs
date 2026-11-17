@@ -1037,11 +1037,11 @@ fn kind_label(kind: &str) -> &str {
 }
 
 fn repository_label(repository: &Repository) -> String {
-	let mut label = format!(
-		"{}: {}",
-		repository.full_name,
-		repository.description.as_deref().filter(|text| !text.is_empty()).unwrap_or("no description"),
-	);
+	let mut label = repository.full_name.clone();
+	if let Some(description) = repository.description.as_deref().filter(|text| !text.is_empty()) {
+		label.push_str(": ");
+		label.push_str(description);
+	}
 	if repository.private {
 		label.push_str(", private");
 	}
