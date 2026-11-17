@@ -169,6 +169,8 @@ struct State {
 	loaded: [Option<Loaded>; View::COUNT],
 	/// Set while a view's next page is on its way, so reaching the end again doesn't ask twice.
 	loading_more: [bool; View::COUNT],
+	/// Which way the lists run.
+	lists: config::Lists,
 	unread_only: bool,
 	issue_filter: IssueState,
 	/// Set while the sign-in dialog is up, so the five views in flight cannot each raise
@@ -218,6 +220,7 @@ impl Default for State {
 			view: View::Notifications,
 			loaded: [const { None }; View::COUNT],
 			loading_more: [false; View::COUNT],
+			lists: config::Lists::default(),
 			unread_only: true,
 			issue_filter: IssueState::Open,
 			signing_in: false,
@@ -279,7 +282,10 @@ impl MainWindow {
 		// Made after the lists, so no screen reader takes it for one's label.
 		let live_region = live::live_region(&panel);
 		panel.set_sizer(sections.sizer(2), true);
-		let state = State { arrangement, view: first, ..State::default() };
+		let state = State { arrangement, view: first, lists: config.lists, ..State::default() };
+		for (_, list) in sections.lists() {
+			list.set_start_at_end(config.lists.oldest_first);
+		}
 		let visibility = Rc::new(Visibility::new(frame));
 		#[cfg(not(target_os = "macos"))]
 		let tray = {
@@ -566,9 +572,12 @@ impl MainWindow {
 
 	fn open_settings(&self) {
 		let mut config = config::load();
-		let current =
-			dialogs::Settings { views: self.state.borrow().arrangement.clone(), log_level: config.log_level() };
-		let Some(dialogs::Settings { views: arrangement, log_level }) =
+		let current = dialogs::Settings {
+			views: self.state.borrow().arrangement.clone(),
+			lists: self.state.borrow().lists,
+			log_level: config.log_level(),
+		};
+		let Some(dialogs::Settings { views: arrangement, lists, log_level }) =
 			dialogs::show_settings_dialog(&self.frame, &current, &config::folder())
 		else {
 			return;
@@ -579,6 +588,7 @@ impl MainWindow {
 			config.log_level = Some(log_level.to_string());
 		}
 		config.views = views_setting(&arrangement);
+		config.lists = lists;
 		if arrangement != current.views {
 			tracing::info!(order = ?config.views.order, hidden = ?config.views.hidden, "views changed");
 		}
@@ -591,6 +601,19 @@ impl MainWindow {
 		}
 		self.state.borrow_mut().arrangement = arrangement;
 		self.fill_views();
+		if lists != current.lists {
+			tracing::info!(
+				oldest_first = lists.oldest_first,
+				preserve_thread_order = lists.preserve_thread_order,
+				"list order changed"
+			);
+			self.state.borrow_mut().lists = lists;
+			// Each list turns round where it stands, keeping the item it was on.
+			for (view, list) in self.sections.lists() {
+				list.set_start_at_end(lists.oldest_first);
+				self.fill(view);
+			}
+		}
 	}
 
 	/// Moves the view on screen up the Views list, or down it, past any hidden views, saves the new
@@ -772,11 +795,13 @@ impl MainWindow {
 		spawn_for(&self.frame, async move { window.store(view, fetched.await) });
 	}
 
-	/// Loads `view`'s next page once its last item is selected, as Fedra does at the end of a
-	/// timeline. The cursor stays where it is, and the new items are there when it moves on.
+	/// Loads `view`'s next page once its oldest item is selected, as Fedra does at the end of a
+	/// timeline: the last row, or the first when lists run oldest first. The cursor stays where it
+	/// is, and the new items are there when it moves on.
 	fn load_more_at_end(&self, view: View) {
 		let list = self.list(view);
-		let at_end = list.selected_index().is_some_and(|index| index + 1 == list.len());
+		let lists = self.state.borrow().lists;
+		let at_end = list.selected_index().is_some_and(|index| lists.at_oldest(index, list.len()));
 		let (client, more) = {
 			let mut state = self.state.borrow_mut();
 			let more = state.loaded[view.index()].as_ref().and_then(|loaded| loaded.more.clone());
@@ -900,7 +925,9 @@ impl MainWindow {
 			if loaded.labels.is_empty() {
 				vec![(MESSAGE_KEY.to_owned(), view.empty_message().to_owned())]
 			} else {
-				loaded.items.keys().into_iter().map(str::to_owned).zip(loaded.labels.iter().cloned()).collect()
+				let rows = loaded.items.keys().into_iter().map(str::to_owned).zip(loaded.labels.iter().cloned());
+				// Items are held newest first, as GitHub sends them.
+				if state.lists.oldest_first { rows.rev().collect() } else { rows.collect() }
 			}
 		};
 		self.list(view).update_labelled(rows, Select::Keep);

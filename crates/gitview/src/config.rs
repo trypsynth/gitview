@@ -21,6 +21,38 @@ pub struct Config {
 	pub shortcuts: Shortcuts,
 	/// How much goes in the log, by logkeeper's names for its levels, such as `debug`.
 	pub log_level: Option<String>,
+	pub lists: Lists,
+}
+
+/// Which way lists run, as Fedra's Display options have it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Lists {
+	/// Every list runs oldest to newest, rather than newest first.
+	pub oldest_first: bool,
+	/// A thread reads oldest first, as a conversation, whichever way the other lists run.
+	pub preserve_thread_order: bool,
+}
+
+impl Default for Lists {
+	fn default() -> Self {
+		Self { oldest_first: false, preserve_thread_order: true }
+	}
+}
+
+impl Lists {
+	/// Whether a thread's posts run oldest first.
+	#[must_use]
+	pub const fn thread_oldest_first(self) -> bool {
+		self.preserve_thread_order || self.oldest_first
+	}
+
+	/// Whether row `index` of `len` holds a list's oldest item, where reaching it loads more:
+	/// the last row, or the first when lists run oldest first.
+	#[must_use]
+	pub const fn at_oldest(self, index: usize, len: usize) -> bool {
+		if self.oldest_first { index == 0 } else { index + 1 == len }
+	}
 }
 
 impl Config {
@@ -75,4 +107,26 @@ pub fn folder() -> PathBuf {
 fn home() -> Homeport {
 	let name = if cfg!(any(target_os = "windows", target_os = "macos")) { "Gitview" } else { "gitview" };
 	Homeport::new(name).with_config_override(CONFIG_DIR_VARIABLE)
+}
+
+#[cfg(test)]
+mod tests {
+	use super::Lists;
+
+	#[test]
+	fn lists_run_newest_first_and_threads_read_as_conversations_by_default() {
+		let lists = Lists::default();
+		assert!(!lists.oldest_first);
+		assert!(lists.thread_oldest_first());
+		assert!(!Lists { preserve_thread_order: false, ..lists }.thread_oldest_first());
+		assert!(Lists { oldest_first: true, preserve_thread_order: false }.thread_oldest_first());
+	}
+
+	#[test]
+	fn the_oldest_row_is_last_unless_lists_run_oldest_first() {
+		let newest_first = Lists::default();
+		assert!(newest_first.at_oldest(9, 10) && !newest_first.at_oldest(0, 10));
+		let oldest_first = Lists { oldest_first: true, ..newest_first };
+		assert!(oldest_first.at_oldest(0, 10) && !oldest_first.at_oldest(9, 10));
+	}
 }

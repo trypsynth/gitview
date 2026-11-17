@@ -15,9 +15,12 @@ use wxdragon::{
 };
 
 use super::{comment::post_comment, open_on_enter, page::show_page};
-use crate::ui::{
-	live, notice,
-	text::{body_html, comment_count, local_time},
+use crate::{
+	config,
+	ui::{
+		live, notice,
+		text::{body_html, comment_count, local_time},
+	},
 };
 
 const THREAD_SIZE: Size = Size { width: 700, height: 450 };
@@ -132,8 +135,12 @@ fn show_thread_dialog(parent: &dyn WxWidget, client: Arc<Client>, repo: String, 
 	let list = ListBox::builder(&dialog).with_size(THREAD_SIZE).build();
 	// Speaks what copying did. Made after the list, so no screen reader takes it for its label.
 	let live_region = live::live_region(&dialog);
-	let posts: Vec<Post> =
+	let oldest_first = config::load().lists.thread_oldest_first();
+	let mut posts: Vec<Post> =
 		std::iter::once(Post::of_issue(issue)).chain(comments.iter().map(Post::of_comment)).collect();
+	if !oldest_first {
+		posts.reverse();
+	}
 	for post in &posts {
 		list.append(&post.label);
 	}
@@ -160,9 +167,16 @@ fn show_thread_dialog(parent: &dyn WxWidget, client: Arc<Client>, repo: String, 
 		let posts = Rc::clone(&posts);
 		post_comment(dialog, Arc::clone(&client), repo.clone(), number, &initial, move |comment| {
 			let post = Post::of_comment(&comment);
-			list.append(&post.label);
-			posts.borrow_mut().push(post);
-			list.set_selection(list.get_count() - 1, true);
+			// The newest post goes where the newest are.
+			if oldest_first {
+				list.append(&post.label);
+				posts.borrow_mut().push(post);
+				list.set_selection(list.get_count() - 1, true);
+			} else {
+				list.insert(&post.label, 0);
+				posts.borrow_mut().insert(0, post);
+				list.set_selection(0, true);
+			}
 			list.set_focus();
 		});
 	};

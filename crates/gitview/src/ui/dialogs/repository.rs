@@ -21,11 +21,14 @@ use wx_utils::{
 use wxdragon::prelude::*;
 
 use super::{is_plain_enter, open_issue, page::show_page};
-use crate::ui::{
-	notice,
-	sectioned::SectionedLists,
-	text::{comment_count, count, local_time},
-	web,
+use crate::{
+	config::{self, Lists},
+	ui::{
+		notice,
+		sectioned::SectionedLists,
+		text::{comment_count, count, local_time},
+		web,
+	},
 };
 
 const LIST_SIZE: Size = Size { width: 600, height: 400 };
@@ -89,18 +92,22 @@ pub fn open_repository<P: WxWidget + WxEvtHandler + Copy + 'static>(parent: P, c
 	let dialog = Dialog::builder(&parent, &repo).build();
 	let padding = dialog_padding(&dialog);
 	let sections = SectionedLists::new(&dialog, "Sections", &Section::ALL.map(|section| (section, section.title())));
+	let lists = config::load().lists;
 	for (_, list) in sections.lists() {
 		list.set_min_size(LIST_SIZE);
+		list.set_start_at_end(lists.oldest_first);
 	}
 	let close_button = Button::builder(&dialog).with_id(ID_CANCEL).with_label("Close").build();
 	dialog.set_escape_id(ID_CANCEL);
 	let commits = Feed::new(
 		&sections,
+		lists,
 		|section| section == Section::Commits,
 		|_, commit: &Commit| Some((commit.sha.clone(), commit_label(commit))),
 	);
-	let open_issues = Feed::new(&sections, |section| section.issue_state() == Some(IssueState::Open), issue_row);
-	let closed_issues = Feed::new(&sections, |section| section.issue_state() == Some(IssueState::Closed), issue_row);
+	let open_issues = Feed::new(&sections, lists, |section| section.issue_state() == Some(IssueState::Open), issue_row);
+	let closed_issues =
+		Feed::new(&sections, lists, |section| section.issue_state() == Some(IssueState::Closed), issue_row);
 	// Held weakly, since the lists hold this and the feeds hold the lists. The feeds themselves
 	// live as long as this function does, which is as long as the dialog is up.
 	let at_end: Rc<dyn Fn(Section)> = {
@@ -125,7 +132,7 @@ pub fn open_repository<P: WxWidget + WxEvtHandler + Copy + 'static>(parent: P, c
 			}
 		})
 	};
-	bind_lists(dialog, &sections, &client, &repo, &at_end);
+	bind_lists(dialog, &sections, &client, &repo, lists, &at_end);
 	let (commits_client, commits_repo) = (Arc::clone(&client), repo.clone());
 	start(
 		dialog,
@@ -179,13 +186,14 @@ fn bind_lists(
 	sections: &SectionedLists<Section>,
 	client: &Arc<Client>,
 	repo: &str,
+	lists: Lists,
 	at_end: &Rc<dyn Fn(Section)>,
 ) {
 	for (section, list) in sections.lists() {
 		let (reached, at_end) = (Rc::downgrade(list), Rc::clone(at_end));
 		list.on_selection_changed(move || {
 			if let Some(list) = reached.upgrade()
-				&& list.selected_index().is_some_and(|index| index + 1 == list.len())
+				&& list.selected_index().is_some_and(|index| lists.at_oldest(index, list.len()))
 			{
 				at_end(section);
 			}
@@ -232,6 +240,8 @@ struct Feed<T> {
 	next: Option<Cursor<T>>,
 	/// Set while pages are on their way, so reaching the end again doesn't ask twice.
 	loading: bool,
+	/// Whether the lists run oldest first, which shows the rows, held newest first, reversed.
+	oldest_first: bool,
 	/// The row an item makes in a section, or `None` when the section doesn't list it.
 	row: fn(Section, &T) -> Option<(String, String)>,
 }
@@ -242,15 +252,16 @@ type Shared<T> = Rc<RefCell<Feed<T>>>;
 impl<T> Feed<T> {
 	fn new(
 		sections: &SectionedLists<Section>,
+		lists: Lists,
 		feeds: impl Fn(Section) -> bool,
 		row: fn(Section, &T) -> Option<(String, String)>,
 	) -> Shared<T> {
-		let lists = sections
+		let shown = sections
 			.lists()
 			.filter(|(section, _)| feeds(*section))
 			.map(|(section, list)| (section, Rc::clone(list), Vec::new()))
 			.collect();
-		Rc::new(RefCell::new(Self { lists, next: None, loading: false, row }))
+		Rc::new(RefCell::new(Self { lists: shown, next: None, loading: false, oldest_first: lists.oldest_first, row }))
 	}
 
 	/// Adds `items` to the sections that list them, and says which sections gained rows.
@@ -277,12 +288,19 @@ impl<T> Feed<T> {
 /// The feed is let go before any list is filled: filling a list runs its selection callback,
 /// and reaching a list's end from there loads more of this same feed.
 fn show<T>(feed: &Shared<T>, select: &Select<String>) {
+	let feed = feed.borrow();
 	let shown: Vec<_> = feed
-		.borrow()
 		.lists
 		.iter()
-		.map(|(section, list, rows)| (Rc::clone(list), rows.clone(), section.empty_message()))
+		.map(|(section, list, rows)| {
+			let mut rows = rows.clone();
+			if feed.oldest_first {
+				rows.reverse();
+			}
+			(Rc::clone(list), rows, section.empty_message())
+		})
 		.collect();
+	drop(feed);
 	for (list, rows, message) in shown {
 		fill(&list, rows, message, select.clone());
 	}
