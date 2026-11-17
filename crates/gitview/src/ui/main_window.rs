@@ -1,16 +1,18 @@
 use std::{
 	cell::RefCell,
+	collections::HashSet,
 	rc::Rc,
 	sync::Arc,
 	time::{Duration, Instant},
 };
 
 use gitview_core::{
-	Client, Error,
+	Client, Cursor, Error, Page,
 	models::{CloseReason, Issue, IssueState, Notification, Repository},
 };
 use key_chord::KeyChord;
 use quiet_list::{QuietList, Select};
+use serde::de::DeserializeOwned;
 use wx_utils::{
 	menu_label, post_to_ui, prompt_text, set_menu_item_label, show_error,
 	tasks::{Queue, background_blocking, sleep, spawn_for, spawn_local},
@@ -84,6 +86,67 @@ impl Items {
 			Self::Issues(items) => items.iter().map(|item| item.html_url.as_str()).collect(),
 		}
 	}
+
+	/// Adds the items of the next page, leaving out any already here: the pages shift when
+	/// items arrive between one request and the next.
+	fn extend(&mut self, more: Self) {
+		match (self, more) {
+			(Self::Notifications(items), Self::Notifications(more)) => append_new(items, more, |item| &item.id),
+			(Self::Repositories(items), Self::Repositories(more)) => append_new(items, more, |item| &item.full_name),
+			(Self::Issues(items), Self::Issues(more)) => append_new(items, more, |item| &item.html_url),
+			_ => {}
+		}
+	}
+}
+
+/// Where the rest of a view's items are, a page at a time.
+#[derive(Clone)]
+enum More {
+	Notifications(Cursor<Notification>),
+	Repositories(Cursor<Repository>),
+	Issues(Cursor<Issue>),
+}
+
+impl More {
+	/// Loads the page this points at, with where the one after it is.
+	fn load(&self, client: &Client) -> Result<(Items, Option<Self>), Error> {
+		Ok(match self {
+			Self::Notifications(cursor) => {
+				let page = client.next_page(cursor)?;
+				(Items::Notifications(page.items), page.next.map(Self::Notifications))
+			}
+			Self::Repositories(cursor) => {
+				let page = client.next_page(cursor)?;
+				(Items::Repositories(page.items), page.next.map(Self::Repositories))
+			}
+			Self::Issues(cursor) => {
+				let page = client.next_page(cursor)?;
+				(Items::Issues(page.items), page.next.map(Self::Issues))
+			}
+		})
+	}
+}
+
+/// A view as fetched: its items, where more of them are, and how many pages it took.
+struct Fetched {
+	items: Items,
+	more: Option<More>,
+	pages: usize,
+}
+
+impl Fetched {
+	/// `first`, and up to `pages` in all, as far as the list goes.
+	fn load<T: DeserializeOwned>(
+		client: &Client,
+		first: Result<Page<T>, Error>,
+		pages: usize,
+		items: fn(Vec<T>) -> Items,
+		more: fn(Cursor<T>) -> More,
+	) -> Result<Self, Error> {
+		let mut page = first?;
+		client.load_pages(&mut page, pages.saturating_sub(1))?;
+		Ok(Self { items: items(page.items), more: page.next.map(more), pages })
+	}
 }
 
 /// What a view holds once it has been fetched. The labels are kept so a poll that changed
@@ -91,6 +154,10 @@ impl Items {
 struct Loaded {
 	items: Items,
 	labels: Vec<String>,
+	/// Where the next page is, when there is one.
+	more: Option<More>,
+	/// How many pages the view has loaded, which a poll fetches again in full.
+	pages: usize,
 }
 
 struct State {
@@ -99,6 +166,8 @@ struct State {
 	arrangement: Vec<(View, bool)>,
 	view: View,
 	loaded: [Option<Loaded>; View::COUNT],
+	/// Set while a view's next page is on its way, so reaching the end again doesn't ask twice.
+	loading_more: [bool; View::COUNT],
 	unread_only: bool,
 	issue_filter: IssueState,
 	/// Set while the sign-in dialog is up, so the five views in flight cannot each raise
@@ -147,6 +216,7 @@ impl Default for State {
 			arrangement: view::arrange(&[], &[]),
 			view: View::Notifications,
 			loaded: [const { None }; View::COUNT],
+			loading_more: [false; View::COUNT],
 			unread_only: true,
 			issue_filter: IssueState::Open,
 			signing_in: false,
@@ -308,11 +378,14 @@ impl MainWindow {
 			window.move_view(down);
 			true
 		});
-		for (_, list) in self.sections.lists() {
+		for (view, list) in self.sections.lists() {
 			let window = self.clone();
 			list.on_activate(move || window.perform(Action::Open));
 			let window = self.clone();
-			list.on_selection_changed(move || window.update_actions_menu());
+			list.on_selection_changed(move || {
+				window.update_actions_menu();
+				window.load_more_at_end(view);
+			});
 			let window = self.clone();
 			list.on_context_menu(move || window.show_context_menu());
 		}
@@ -656,29 +729,104 @@ impl MainWindow {
 		}
 	}
 
-	/// Asks GitHub for `view` again. The list keeps what it has until the answer arrives.
+	/// Asks GitHub for `view` again, as many pages as it has loaded. The list keeps what it has
+	/// until the answer arrives.
 	fn fetch(&self, view: View) {
-		let (Some(client), unread_only, issue_filter) = ({
+		let (Some(client), unread_only, issue_filter, pages) = ({
 			let state = self.state.borrow();
-			(state.client.clone(), state.unread_only, state.issue_filter)
+			let pages = state.loaded[view.index()].as_ref().map_or(1, |loaded| loaded.pages);
+			(state.client.clone(), state.unread_only, state.issue_filter, pages)
 		}) else {
 			return;
 		};
-		let fetched = background_blocking(move || match view {
-			View::Notifications => client.notifications(!unread_only).map(|page| Items::Notifications(page.items)),
-			View::Repositories => client.repositories().map(|page| Items::Repositories(page.items)),
-			View::Starred => client.starred().map(|page| Items::Repositories(page.items)),
-			View::Watched => client.watched().map(|page| Items::Repositories(page.items)),
-			View::Assigned => client.assigned(issue_filter).map(|page| Items::Issues(page.items)),
-			View::ReviewRequested => client.review_requests(issue_filter).map(|page| Items::Issues(page.items)),
+		let fetched = background_blocking(move || {
+			let client = &*client;
+			match view {
+				View::Notifications => Fetched::load(
+					client,
+					client.notifications(!unread_only),
+					pages,
+					Items::Notifications,
+					More::Notifications,
+				),
+				View::Repositories => {
+					Fetched::load(client, client.repositories(), pages, Items::Repositories, More::Repositories)
+				}
+				View::Starred => {
+					Fetched::load(client, client.starred(), pages, Items::Repositories, More::Repositories)
+				}
+				View::Watched => {
+					Fetched::load(client, client.watched(), pages, Items::Repositories, More::Repositories)
+				}
+				View::Assigned => {
+					Fetched::load(client, client.assigned(issue_filter), pages, Items::Issues, More::Issues)
+				}
+				View::ReviewRequested => {
+					Fetched::load(client, client.review_requests(issue_filter), pages, Items::Issues, More::Issues)
+				}
+			}
 		});
 		let window = self.clone();
 		spawn_for(&self.frame, async move { window.store(view, fetched.await) });
 	}
 
-	fn store(&self, view: View, result: Result<Items, Error>) {
-		let mut items = match result {
-			Ok(items) => items,
+	/// Loads `view`'s next page once its last item is selected, as Fedra does at the end of a
+	/// timeline. The cursor stays where it is, and the new items are there when it moves on.
+	fn load_more_at_end(&self, view: View) {
+		let list = self.list(view);
+		let at_end = list.selected_index().is_some_and(|index| index + 1 == list.len());
+		let (client, more) = {
+			let mut state = self.state.borrow_mut();
+			let more = state.loaded[view.index()].as_ref().and_then(|loaded| loaded.more.clone());
+			let (Some(client), Some(more), true, false) =
+				(state.client.clone(), more, at_end, state.loading_more[view.index()])
+			else {
+				return;
+			};
+			state.loading_more[view.index()] = true;
+			(client, more)
+		};
+		tracing::debug!(view = view.id(), "loading more");
+		let page = background_blocking(move || more.load(&client));
+		let window = self.clone();
+		spawn_for(&self.frame, async move {
+			let page = page.await;
+			window.state.borrow_mut().loading_more[view.index()] = false;
+			match page {
+				Ok((items, more)) => window.add_page(view, items, more),
+				Err(error) => {
+					tracing::warn!(view = view.id(), %error, "couldn't load more");
+					if window.state.borrow().view == view {
+						window.announce("Could not load more.");
+					}
+				}
+			}
+		});
+	}
+
+	/// Puts a page loaded at the end of `view` after what it already holds.
+	fn add_page(&self, view: View, items: Items, more: Option<More>) {
+		{
+			let mut state = self.state.borrow_mut();
+			let State { loaded, issue_changes, issue_filter, .. } = &mut *state;
+			let Some(loaded) = loaded[view.index()].as_mut() else {
+				return;
+			};
+			loaded.items.extend(items);
+			if let Items::Issues(issues) = &mut loaded.items {
+				IssueChange::apply(issue_changes, issues, *issue_filter);
+			}
+			loaded.labels = loaded.items.labels();
+			loaded.more = more;
+			loaded.pages += 1;
+			tracing::debug!(view = view.id(), items = loaded.labels.len(), "loaded more");
+		}
+		self.fill(view);
+	}
+
+	fn store(&self, view: View, result: Result<Fetched, Error>) {
+		let Fetched { mut items, more, pages } = match result {
+			Ok(fetched) => fetched,
 			Err(Error::Unauthorized) => {
 				tracing::warn!(view = view.id(), "GitHub no longer accepts the saved sign-in");
 				token::delete();
@@ -719,7 +867,7 @@ impl MainWindow {
 			let unchanged = state.loaded[view.index()]
 				.as_ref()
 				.is_some_and(|loaded| loaded.labels == labels && loaded.items.keys() == items.keys());
-			state.loaded[view.index()] = Some(Loaded { items, labels });
+			state.loaded[view.index()] = Some(Loaded { items, labels, more, pages });
 			(state.view == view, unchanged)
 		};
 		if !unchanged {
@@ -1073,6 +1221,12 @@ fn moved_message(order: &[View], moved: View) -> String {
 		(None, Some(after)) => format!("Moved before {after}."),
 		(None, None) => format!("Moved {}.", moved.title()),
 	}
+}
+
+/// Adds the items of `more` whose key isn't in `items` already.
+fn append_new<T>(items: &mut Vec<T>, more: Vec<T>, key: impl Fn(&T) -> &String) {
+	let seen: HashSet<String> = items.iter().map(|item| key(item).clone()).collect();
+	items.extend(more.into_iter().filter(|item| !seen.contains(key(item))));
 }
 
 /// The views the Views list shows, in order. Never empty: were every view hidden, as a hand-edited
