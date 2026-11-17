@@ -48,7 +48,7 @@ pub fn show_settings_dialog(parent: &dyn WxWidget, settings: &Settings, log_fold
 	page.add(&list, 1, SizerFlag::Expand | SizerFlag::All, padding);
 	views_page.set_sizer(page, true);
 	notebook.add_page(&views_page, "Views", true, None);
-	let (oldest_first, preserve_thread_order) = display_page(notebook, padding, settings.lists);
+	let oldest_first = display_page(notebook, padding, settings.lists);
 	let log_level = advanced_page(notebook, padding, settings.log_level, log_folder);
 	let content = BoxSizer::builder(Orientation::Vertical).build();
 	content.add(&notebook, 1, SizerFlag::Expand | SizerFlag::All, padding);
@@ -66,10 +66,7 @@ pub fn show_settings_dialog(parent: &dyn WxWidget, settings: &Settings, log_fold
 			let level = log_level.get_selection().and_then(|index| LOG_LEVELS.get(index as usize));
 			break Some(Settings {
 				views: views.clone(),
-				lists: Lists {
-					oldest_first: oldest_first.get_value(),
-					preserve_thread_order: preserve_thread_order.get_value(),
-				},
+				lists: Lists { oldest_first: oldest_first.get_value() },
 				log_level: level.map_or(settings.log_level, |(level, _)| *level),
 			});
 		}
@@ -80,21 +77,18 @@ pub fn show_settings_dialog(parent: &dyn WxWidget, settings: &Settings, log_fold
 	result
 }
 
-/// The page for which way lists run, with Fedra's two checkboxes. Returns them in order.
-fn display_page(notebook: Notebook, padding: i32, lists: Lists) -> (CheckBox, CheckBox) {
+/// The page for which way lists run. Returns its checkbox.
+fn display_page(notebook: Notebook, padding: i32, lists: Lists) -> CheckBox {
 	let page = Panel::builder(&notebook).build();
 	#[cfg(target_os = "windows")]
 	page.set_accessibility_role(AccRole::PropertyPage);
 	let oldest_first = CheckBox::builder(&page).with_label("Show oldest entries &first").build();
 	oldest_first.set_value(lists.oldest_first);
-	let preserve_thread_order = CheckBox::builder(&page).with_label("Always preserve thread &order").build();
-	preserve_thread_order.set_value(lists.preserve_thread_order);
 	let content = BoxSizer::builder(Orientation::Vertical).build();
-	content.add(&oldest_first, 0, SizerFlag::Left | SizerFlag::Right | SizerFlag::Top, padding);
-	content.add(&preserve_thread_order, 0, SizerFlag::All, padding);
+	content.add(&oldest_first, 0, SizerFlag::All, padding);
 	page.set_sizer(content, true);
 	notebook.add_page(&page, "Display", false, None);
-	(oldest_first, preserve_thread_order)
+	oldest_first
 }
 
 /// The page for what most people never change: how much goes in the log, and where it is.

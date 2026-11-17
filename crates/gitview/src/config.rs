@@ -24,29 +24,16 @@ pub struct Config {
 	pub lists: Lists,
 }
 
-/// Which way lists run, as Fedra's Display options have it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// Which way lists run, as Fedra's Display options have it. A thread always reads oldest first,
+/// as a conversation.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Lists {
 	/// Every list runs oldest to newest, rather than newest first.
 	pub oldest_first: bool,
-	/// A thread reads oldest first, as a conversation, whichever way the other lists run.
-	pub preserve_thread_order: bool,
-}
-
-impl Default for Lists {
-	fn default() -> Self {
-		Self { oldest_first: false, preserve_thread_order: true }
-	}
 }
 
 impl Lists {
-	/// Whether a thread's posts run oldest first.
-	#[must_use]
-	pub const fn thread_oldest_first(self) -> bool {
-		self.preserve_thread_order || self.oldest_first
-	}
-
 	/// Whether row `index` of `len` holds a list's oldest item, where reaching it loads more:
 	/// the last row, or the first when lists run oldest first.
 	#[must_use]
@@ -114,19 +101,15 @@ mod tests {
 	use super::Lists;
 
 	#[test]
-	fn lists_run_newest_first_and_threads_read_as_conversations_by_default() {
-		let lists = Lists::default();
-		assert!(!lists.oldest_first);
-		assert!(lists.thread_oldest_first());
-		assert!(!Lists { preserve_thread_order: false, ..lists }.thread_oldest_first());
-		assert!(Lists { oldest_first: true, preserve_thread_order: false }.thread_oldest_first());
+	fn lists_run_newest_first_by_default() {
+		assert!(!Lists::default().oldest_first);
 	}
 
 	#[test]
 	fn the_oldest_row_is_last_unless_lists_run_oldest_first() {
 		let newest_first = Lists::default();
 		assert!(newest_first.at_oldest(9, 10) && !newest_first.at_oldest(0, 10));
-		let oldest_first = Lists { oldest_first: true, ..newest_first };
+		let oldest_first = Lists { oldest_first: true };
 		assert!(oldest_first.at_oldest(0, 10) && !oldest_first.at_oldest(9, 10));
 	}
 }

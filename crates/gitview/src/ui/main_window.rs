@@ -604,11 +604,7 @@ impl MainWindow {
 		self.state.borrow_mut().arrangement = arrangement;
 		self.fill_views();
 		if lists != current.lists {
-			tracing::info!(
-				oldest_first = lists.oldest_first,
-				preserve_thread_order = lists.preserve_thread_order,
-				"list order changed"
-			);
+			tracing::info!(oldest_first = lists.oldest_first, "list order changed");
 			self.state.borrow_mut().lists = lists;
 			// Each list turns round where it stands, keeping the item it was on.
 			for (view, list) in self.sections.lists() {

@@ -219,7 +219,7 @@ pub fn fill(list: &QuietList<String>, rows: Rows, message: &str, select: Select<
 /// callback holds it weakly, so the lists can go once the dialog closes.
 pub fn on_reaching_oldest<S: FeedSection>(sections: &SectionedLists<S>, lists: Lists, at_end: &Rc<dyn Fn(S)>) {
 	for (section, list) in sections.lists() {
-		let lists = Lists { oldest_first: lists.oldest_first && section.follows_order(), ..lists };
+		let lists = Lists { oldest_first: lists.oldest_first && section.follows_order() };
 		let (reached, at_end) = (Rc::downgrade(list), Rc::clone(at_end));
 		list.on_selection_changed(move || {
 			if let Some(list) = reached.upgrade()
