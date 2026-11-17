@@ -26,7 +26,7 @@ use wxdragon::{
 use super::tray::Tray;
 use super::{
 	actions::{self, Action, Marks, Selected},
-	dialogs::{self, Listing},
+	dialogs,
 	hotkeys::{GlobalAction, Hotkeys},
 	live,
 	sectioned::SectionedLists,
@@ -781,14 +781,6 @@ impl MainWindow {
 					Action::MarkDone => client.mark_notification_done(&id),
 					_ => client.unsubscribe(&id),
 				});
-			}
-			Action::Issues | Action::PullRequests => {
-				let Selected::Repository(repository) = selected else {
-					return;
-				};
-				let listing = if action == Action::Issues { Listing::Issues } else { Listing::PullRequests };
-				let state = self.state.borrow().issue_filter;
-				dialogs::open_issues(self.frame, client, repository.full_name, state, listing);
 			}
 			Action::Star | Action::Unstar => {
 				let Selected::Repository(repository) = selected else {

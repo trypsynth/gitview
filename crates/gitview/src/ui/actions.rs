@@ -48,8 +48,6 @@ pub enum Action {
 	MarkRead,
 	MarkDone,
 	Unsubscribe,
-	Issues,
-	PullRequests,
 	Star,
 	Unstar,
 	Watch,
@@ -59,7 +57,7 @@ pub enum Action {
 }
 
 impl Action {
-	const ALL: [Self; 18] = [
+	const ALL: [Self; 16] = [
 		Self::Open,
 		Self::Comment,
 		Self::CloseCompleted,
@@ -70,8 +68,6 @@ impl Action {
 		Self::MarkRead,
 		Self::MarkDone,
 		Self::Unsubscribe,
-		Self::Issues,
-		Self::PullRequests,
 		Self::Star,
 		Self::Unstar,
 		Self::Watch,
@@ -100,8 +96,6 @@ impl Action {
 			Self::MarkRead => "Mark as &read",
 			Self::MarkDone => "Mark as &done\tDelete",
 			Self::Unsubscribe => "&Unsubscribe",
-			Self::Issues => "&Issues",
-			Self::PullRequests => "&Pull requests",
 			Self::Star => "S&tar",
 			Self::Unstar => "Uns&tar",
 			Self::Watch => "&Watch",
@@ -123,8 +117,6 @@ impl Action {
 			Self::MarkRead => "Mark the notification as read",
 			Self::MarkDone => "Remove the notification from your inbox",
 			Self::Unsubscribe => "Stop notifications for this thread",
-			Self::Issues => "List the repository's issues",
-			Self::PullRequests => "List the repository's pull requests",
 			Self::Star => "Star the repository",
 			Self::Unstar => "Remove your star",
 			Self::Watch => "Get notified of all activity in the repository",
@@ -153,8 +145,6 @@ fn entries(selected: &Selected, marks: Marks) -> Vec<Entry> {
 	let mut entries = vec![Entry::Action(Action::Open)];
 	if let Selected::Repository(_) = selected {
 		entries.extend([
-			Entry::Action(Action::Issues),
-			Entry::Action(Action::PullRequests),
 			Entry::Separator,
 			Entry::Action(if marks.starred { Action::Unstar } else { Action::Star }),
 			Entry::Action(if marks.watching { Action::Unwatch } else { Action::Watch }),

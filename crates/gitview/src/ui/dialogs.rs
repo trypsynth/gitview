@@ -1,5 +1,4 @@
 mod comment;
-mod issues;
 mod page;
 mod profile;
 mod repository;
@@ -10,7 +9,6 @@ mod sign_in;
 mod thread;
 
 pub use comment::post_comment;
-pub use issues::{Listing, open_issues};
 pub use page::open_subject;
 pub use profile::edit_profile;
 pub use repository::open_repository;
