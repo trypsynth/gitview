@@ -1137,6 +1137,7 @@ dependencies = [
  "ego-tree",
  "scraper",
  "serde",
+ "serde_json",
  "thiserror",
  "tracing",
  "uniffi",

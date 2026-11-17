@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize, de::IgnoredAny};
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct User {
@@ -182,6 +182,9 @@ pub struct Issue {
 	pub number: u64,
 	pub title: String,
 	pub state: String,
+	/// Why a closed issue was closed: `completed`, `not_planned` or `duplicate`. Open issues and
+	/// pull requests have none.
+	pub state_reason: Option<String>,
 	pub user: User,
 	pub body: Option<String>,
 	/// GitHub's own rendering of `body`, when the request asked for it.
@@ -189,7 +192,8 @@ pub struct Issue {
 	pub comments: u64,
 	pub created_at: String,
 	pub html_url: String,
-	pull_request: Option<IgnoredAny>,
+	/// Only a pull request has this.
+	pull_request: Option<PullRequestLinks>,
 	/// Only the search endpoint sends this; the per-repository listings leave it out.
 	repository_url: Option<String>,
 }
@@ -198,6 +202,12 @@ impl Issue {
 	#[must_use]
 	pub const fn is_pull_request(&self) -> bool {
 		self.pull_request.is_some()
+	}
+
+	/// Whether this is a pull request that was merged, rather than closed without merging.
+	#[must_use]
+	pub fn is_merged(&self) -> bool {
+		self.pull_request.as_ref().is_some_and(|links| links.merged_at.is_some())
 	}
 
 	#[must_use]
@@ -210,6 +220,12 @@ impl Issue {
 	pub fn repository(&self) -> Option<&str> {
 		self.repository_url.as_deref()?.strip_prefix("https://api.github.com/repos/")
 	}
+}
+
+/// What an issue listing says about the pull request an issue is.
+#[derive(Debug, Clone, Deserialize)]
+struct PullRequestLinks {
+	merged_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -312,6 +328,26 @@ mod tests {
 		assert_eq!(summary_only.summary(), "Fix the list");
 		assert_eq!(summary_only.description(), "");
 		assert_eq!(commit("", None).summary(), "");
+	}
+
+	fn issue(state: &str, state_reason: &str, pull_request: &str) -> super::Issue {
+		serde_json::from_str(&format!(
+			r#"{{"id": 1, "number": 4, "title": "t", "state": "{state}", "state_reason": {state_reason},
+			"user": {{"login": "hexxbyte"}}, "body": null, "comments": 0, "created_at": "2026-09-29T02:29:08Z",
+			"html_url": "https://github.com/trypsynth/gitview/issues/4", "pull_request": {pull_request}}}"#
+		))
+		.expect("an issue as GitHub lists it")
+	}
+
+	#[test]
+	fn a_closed_issue_keeps_why_and_a_pull_request_whether_it_merged() {
+		let closed = issue("closed", r#""not_planned""#, "null");
+		assert_eq!(closed.state_reason.as_deref(), Some("not_planned"));
+		assert!(!closed.is_pull_request());
+		let merged = issue("closed", "null", r#"{"url": "u", "merged_at": "2026-11-16T22:58:41Z"}"#);
+		assert!(merged.is_pull_request() && merged.is_merged());
+		let unmerged = issue("closed", "null", r#"{"url": "u", "merged_at": null}"#);
+		assert!(unmerged.is_pull_request() && !unmerged.is_merged());
 	}
 
 	#[test]
