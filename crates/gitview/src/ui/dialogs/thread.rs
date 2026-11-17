@@ -231,6 +231,7 @@ fn bind_post_menu(
 			ID_COPY_TEXT => copy(post.text(), "Text copied."),
 			ID_COPY_LINK => copy(&post.url, "Link copied."),
 			ID_OPEN_IN_BROWSER => {
+				live_region::announce(live_region, "Opening post in browser.");
 				launch_default_browser(&post.url, BrowserLaunchFlags::Default);
 			}
 			_ => event.skip(true),

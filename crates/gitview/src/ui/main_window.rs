@@ -817,7 +817,11 @@ impl MainWindow {
 				});
 			}
 			Action::OpenInBrowser => {
-				self.with_link(client, &selected, |url| {
+				let window = self.clone();
+				let message = format!("Opening {} in browser.", kind_name(&selected));
+				self.with_link(client, &selected, move |url| {
+					// Said first, before the browser takes the screen reader's attention.
+					window.announce(&message);
 					launch_default_browser(url, BrowserLaunchFlags::Default);
 				});
 			}
@@ -1033,6 +1037,16 @@ fn kind_label(kind: &str) -> &str {
 		"CheckSuite" => "Check suite",
 		"RepositoryVulnerabilityAlert" => "Security alert",
 		other => other,
+	}
+}
+
+/// What `selected` is, as a sentence names it, such as "pull request".
+fn kind_name(selected: &Selected) -> String {
+	match selected {
+		Selected::Repository(_) => "repository".to_owned(),
+		Selected::Issue(_) if selected.is_pull_request() => "pull request".to_owned(),
+		Selected::Issue(_) => "issue".to_owned(),
+		Selected::Notification(notification) => kind_label(&notification.subject.kind).to_lowercase(),
 	}
 }
 
