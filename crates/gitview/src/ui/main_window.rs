@@ -334,8 +334,8 @@ impl MainWindow {
 			notice::warning(
 				&self.frame,
 				format!(
-					"Another program already uses {}, so Gitview can't. You can choose another key in Keyboard \
-					 Shortcuts, in the File menu.",
+					"Another program already uses {}, so Gitview can't. You can choose another key in Customize \
+					 Keyboard Shortcuts, in the File menu.",
 					keys.join(" and ")
 				),
 				"Hotkey Not Available",
@@ -983,11 +983,16 @@ fn build_menu_bar(frame: &Frame) {
 	#[cfg(windows)]
 	file_menu.append(
 		ID_SHORTCUTS,
-		"&Keyboard Shortcuts...",
+		"Customize &Keyboard Shortcuts...",
 		"Change the keys that work from anywhere",
 		ItemKind::Normal,
 	);
-	file_menu.append(ID_PROFILE, "Edit &Profile...", "Change your public GitHub profile", ItemKind::Normal);
+	file_menu.append(
+		ID_PROFILE,
+		"Edit &Profile...\tCtrl+Shift+E",
+		"Change your public GitHub profile",
+		ItemKind::Normal,
+	);
 	file_menu.append(ID_SIGN_OUT, "Sign O&ut", "Forget your GitHub sign-in", ItemKind::Normal);
 	file_menu.append(ID_EXIT, "E&xit", "Close Gitview", ItemKind::Normal);
 	frame.set_menu_bar(
