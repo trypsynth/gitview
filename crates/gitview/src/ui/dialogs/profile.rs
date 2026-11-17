@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{cell::Cell, rc::Rc, sync::Arc};
 
 use gitview_core::{
 	Client, Error,
@@ -10,7 +10,7 @@ use wx_utils::{
 };
 use wxdragon::prelude::*;
 
-use crate::ui::notice;
+use crate::ui::{live, notice};
 
 const TITLE: &str = "Edit Profile";
 const HIDE_EMAIL: &str = "Don't show my email address";
@@ -111,9 +111,18 @@ fn show_profile_dialog(parent: &dyn WxWidget, client: Arc<Client>, loaded: Loade
 	// changes travel and can still be fixed if GitHub turns them down.
 	let save_button = Button::builder(&dialog).with_label("&Save").build();
 	let cancel_button = Button::builder(&dialog).with_id(ID_CANCEL).with_label("Cancel").build();
+	// Says the save has started. Made after the buttons, so no screen reader takes it for a label.
+	let live_region = live::live_region(&dialog);
 	save_button.set_default();
 	dialog.set_escape_id(ID_CANCEL);
+	// Save stays enabled while a save runs: disabling the button that has focus would send focus
+	// to Cancel, which a screen reader announces as if a new dialog had opened.
+	let saving = Rc::new(Cell::new(false));
 	save_button.on_click(move |_| {
+		if saving.replace(true) {
+			return;
+		}
+		live_region::announce(live_region, "Saving profile.");
 		// The first choice hides the address, which GitHub takes as an empty one.
 		let email = email
 			.get_selection()
@@ -135,14 +144,14 @@ fn show_profile_dialog(parent: &dyn WxWidget, client: Arc<Client>, loaded: Loade
 		let removed: Vec<String> = social_accounts.iter().filter(|url| !wanted.contains(url)).cloned().collect();
 		let added: Vec<String> = wanted.iter().filter(|url| !social_accounts.contains(url)).cloned().collect();
 		let client = Arc::clone(&client);
-		save_button.enable(false);
+		let saving = Rc::clone(&saving);
 		// Tied to the dialog, so a save that finishes after Cancel touches nothing.
 		spawn_for(&dialog, async move {
 			match background_blocking(move || save(&client, &update, &removed, &added)).await {
 				Ok(()) => dialog.end_modal(ID_OK),
 				Err(error) => {
 					notice::error(&dialog, error, "Could Not Save Profile");
-					save_button.enable(true);
+					saving.set(false);
 				}
 			}
 		});
