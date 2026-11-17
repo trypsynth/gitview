@@ -2,17 +2,18 @@
 //! closed pull requests.
 
 use std::{
-	cell::Cell,
+	cell::{Cell, RefCell},
 	fmt::Write,
 	rc::{Rc, Weak},
 	sync::Arc,
 };
 
 use gitview_core::{
-	Client,
+	Client, Cursor, Error, Page,
 	models::{ChangedFile, Commit, CommitDetails, Issue, IssueState},
 };
 use quiet_list::{QuietList, Select};
+use serde::de::DeserializeOwned;
 use wx_utils::{
 	dialog_padding,
 	tasks::{background_blocking, spawn_for},
@@ -81,9 +82,6 @@ impl Section {
 	}
 }
 
-/// A section that lists issues, with its list.
-type IssueList = (Section, Rc<QuietList<String>>);
-
 /// Shows `repo` (`owner/name`), loading its commits and open issues while the dialog is up, and
 /// its closed issues the first time a section of them is chosen. A list stays empty until what
 /// it lists arrives.
@@ -96,15 +94,66 @@ pub fn open_repository<P: WxWidget + WxEvtHandler + Copy + 'static>(parent: P, c
 	}
 	let close_button = Button::builder(&dialog).with_id(ID_CANCEL).with_label("Close").build();
 	dialog.set_escape_id(ID_CANCEL);
-	bind_lists(dialog, &sections, &client, &repo);
-	load_commits(dialog, Rc::clone(sections.list(Section::Commits)), Arc::clone(&client), repo.clone());
-	load_issues(dialog, issue_lists(&sections, IssueState::Open), Arc::clone(&client), repo.clone(), IssueState::Open);
+	let commits = Feed::new(
+		&sections,
+		|section| section == Section::Commits,
+		|_, commit: &Commit| Some((commit.sha.clone(), commit_label(commit))),
+	);
+	let open_issues = Feed::new(&sections, |section| section.issue_state() == Some(IssueState::Open), issue_row);
+	let closed_issues = Feed::new(&sections, |section| section.issue_state() == Some(IssueState::Closed), issue_row);
+	// Held weakly, since the lists hold this and the feeds hold the lists. The feeds themselves
+	// live as long as this function does, which is as long as the dialog is up.
+	let at_end: Rc<dyn Fn(Section)> = {
+		let (commits, open_issues, closed_issues) =
+			(Rc::downgrade(&commits), Rc::downgrade(&open_issues), Rc::downgrade(&closed_issues));
+		let client = Arc::clone(&client);
+		Rc::new(move |section| match section.issue_state() {
+			None => {
+				if let Some(feed) = commits.upgrade() {
+					load_more(dialog, &client, &feed, section);
+				}
+			}
+			Some(IssueState::Open) => {
+				if let Some(feed) = open_issues.upgrade() {
+					load_more(dialog, &client, &feed, section);
+				}
+			}
+			Some(_) => {
+				if let Some(feed) = closed_issues.upgrade() {
+					load_more(dialog, &client, &feed, section);
+				}
+			}
+		})
+	};
+	bind_lists(dialog, &sections, &client, &repo, &at_end);
+	let (commits_client, commits_repo) = (Arc::clone(&client), repo.clone());
+	start(
+		dialog,
+		Arc::clone(&client),
+		Rc::clone(&commits),
+		move || commits_client.commits(&commits_repo),
+		"Could Not Load Commits",
+	);
+	let (open_client, open_repo) = (Arc::clone(&client), repo.clone());
+	start(
+		dialog,
+		Arc::clone(&client),
+		Rc::clone(&open_issues),
+		move || open_client.issues(&open_repo, IssueState::Open),
+		"Could Not Load Issues",
+	);
 	// Closed issues can run to hundreds, so they wait until someone looks.
 	let closed_requested = Cell::new(false);
-	let closed_lists = issue_lists(&sections, IssueState::Closed);
 	sections.on_section_changed(move |section| {
 		if section.issue_state() == Some(IssueState::Closed) && !closed_requested.replace(true) {
-			load_issues(dialog, closed_lists.clone(), Arc::clone(&client), repo.clone(), IssueState::Closed);
+			let (closed_client, closed_repo) = (Arc::clone(&client), repo.clone());
+			start(
+				dialog,
+				Arc::clone(&client),
+				Rc::clone(&closed_issues),
+				move || closed_client.issues(&closed_repo, IssueState::Closed),
+				"Could Not Load Issues",
+			);
 		}
 	});
 	let content = BoxSizer::builder(Orientation::Vertical).build();
@@ -123,10 +172,24 @@ pub fn open_repository<P: WxWidget + WxEvtHandler + Copy + 'static>(parent: P, c
 }
 
 /// Opens the selected item on Enter or a double-click: a commit as a page, an issue or pull
-/// request as its thread. The lists' own callbacks hold them weakly, so they can go once the
-/// dialog closes.
-fn bind_lists(dialog: Dialog, sections: &SectionedLists<Section>, client: &Arc<Client>, repo: &str) {
+/// request as its thread, and loads more of a section when its last row is reached. The lists'
+/// own callbacks hold them weakly, so they can go once the dialog closes.
+fn bind_lists(
+	dialog: Dialog,
+	sections: &SectionedLists<Section>,
+	client: &Arc<Client>,
+	repo: &str,
+	at_end: &Rc<dyn Fn(Section)>,
+) {
 	for (section, list) in sections.lists() {
+		let (reached, at_end) = (Rc::downgrade(list), Rc::clone(at_end));
+		list.on_selection_changed(move || {
+			if let Some(list) = reached.upgrade()
+				&& list.selected_index().is_some_and(|index| index + 1 == list.len())
+			{
+				at_end(section);
+			}
+		});
 		let open = {
 			let (list, client, repo) = (Rc::downgrade(list), Arc::clone(client), repo.to_owned());
 			Rc::new(move || {
@@ -154,62 +217,170 @@ fn bind_lists(dialog: Dialog, sections: &SectionedLists<Section>, client: &Arc<C
 	}
 }
 
-fn load_commits(dialog: Dialog, list: Rc<QuietList<String>>, client: Arc<Client>, repo: String) {
-	let fetch = background_blocking(move || client.commits(&repo));
+/// Rows as a list shows them: each item's key and label.
+type Rows = Vec<(String, String)>;
+
+/// How many pages one reach for more goes through looking for something for the section that
+/// asked, before settling for what it found. Issues and pull requests share pages, so a section
+/// can come up empty on a page full of the other kind.
+const PAGES_PER_LOAD: usize = 10;
+
+/// A list GitHub hands out a page at a time, and the sections it feeds: commits feed one, issues
+/// feed both the issue and the pull request sections.
+struct Feed<T> {
+	lists: Vec<(Section, Rc<QuietList<String>>, Rows)>,
+	next: Option<Cursor<T>>,
+	/// Set while pages are on their way, so reaching the end again doesn't ask twice.
+	loading: bool,
+	/// The row an item makes in a section, or `None` when the section doesn't list it.
+	row: fn(Section, &T) -> Option<(String, String)>,
+}
+
+/// A feed the dialog and its loading tasks share.
+type Shared<T> = Rc<RefCell<Feed<T>>>;
+
+impl<T> Feed<T> {
+	fn new(
+		sections: &SectionedLists<Section>,
+		feeds: impl Fn(Section) -> bool,
+		row: fn(Section, &T) -> Option<(String, String)>,
+	) -> Shared<T> {
+		let lists = sections
+			.lists()
+			.filter(|(section, _)| feeds(*section))
+			.map(|(section, list)| (section, Rc::clone(list), Vec::new()))
+			.collect();
+		Rc::new(RefCell::new(Self { lists, next: None, loading: false, row }))
+	}
+
+	/// Adds `items` to the sections that list them, and says which sections gained rows.
+	fn add(&mut self, items: &[T]) -> Vec<Section> {
+		let row = self.row;
+		let mut gained = Vec::new();
+		for (section, _, rows) in &mut self.lists {
+			let before = rows.len();
+			rows.extend(items.iter().filter_map(|item| row(*section, item)));
+			if rows.len() > before {
+				gained.push(*section);
+			}
+		}
+		gained
+	}
+
+	fn empty_sections(&self) -> Vec<Section> {
+		self.lists.iter().filter(|(_, _, rows)| rows.is_empty()).map(|(section, _, _)| *section).collect()
+	}
+
+	/// Puts each section's rows in its list, or its message when it has none.
+	fn show(&self, select: &Select<String>) {
+		for (section, list, rows) in &self.lists {
+			fill(list, rows.clone(), section.empty_message(), select.clone());
+		}
+	}
+
+	fn show_failure(&self) {
+		for (section, list, _) in &self.lists {
+			let message = format!("Could not load {}.", section.title().to_lowercase());
+			fill(list, Vec::new(), &message, Select::Start);
+		}
+	}
+}
+
+/// Fills `feed` from its first page, then goes on for any section that page left empty.
+fn start<T: DeserializeOwned + Send + 'static>(
+	dialog: Dialog,
+	client: Arc<Client>,
+	feed: Shared<T>,
+	first: impl FnOnce() -> Result<Page<T>, Error> + Send + 'static,
+	failed_title: &'static str,
+) {
+	feed.borrow_mut().loading = true;
+	let fetch = background_blocking(first);
 	spawn_for(&dialog, async move {
 		match fetch.await {
-			Ok(commits) => {
-				let rows = commits.items.iter().map(|commit| (commit.sha.clone(), commit_label(commit))).collect();
-				fill(&list, rows, Section::Commits.empty_message());
+			Ok(page) => {
+				let empty = {
+					let mut inner = feed.borrow_mut();
+					inner.add(&page.items);
+					inner.next = page.next;
+					inner.show(&Select::Start);
+					inner.empty_sections()
+				};
+				let result = read_on(&client, &feed, empty).await;
+				feed.borrow_mut().loading = false;
+				feed.borrow().show(&Select::Keep);
+				if let Err(error) = result {
+					notice::error(&dialog, error, failed_title);
+				}
 			}
 			Err(error) => {
-				fill(&list, Vec::new(), "Could not load commits.");
-				notice::error(&dialog, error, "Could Not Load Commits");
+				feed.borrow_mut().loading = false;
+				feed.borrow().show_failure();
+				notice::error(&dialog, error, failed_title);
 			}
 		}
 	});
 }
 
-/// The sections that list issues in `state`, with their lists.
-fn issue_lists(sections: &SectionedLists<Section>, state: IssueState) -> Vec<IssueList> {
-	sections
-		.lists()
-		.filter(|(section, _)| section.issue_state() == Some(state))
-		.map(|(section, list)| (section, Rc::clone(list)))
-		.collect()
-}
-
-/// Fetches the issues in `state` and fills `lists`, the sections that show them. GitHub lists
-/// issues and pull requests together, so one request fills both.
-fn load_issues(dialog: Dialog, lists: Vec<IssueList>, client: Arc<Client>, repo: String, state: IssueState) {
-	let fetch = background_blocking(move || client.issues(&repo, state));
+/// Loads more of `feed` for `section`, whose last row was reached, as Fedra does at the end of a
+/// timeline. The selection stays where it is, and the new rows are there when it moves on.
+fn load_more<T: DeserializeOwned + Send + 'static>(
+	dialog: Dialog,
+	client: &Arc<Client>,
+	feed: &Shared<T>,
+	section: Section,
+) {
+	{
+		let mut inner = feed.borrow_mut();
+		if inner.loading || inner.next.is_none() {
+			return;
+		}
+		inner.loading = true;
+	}
+	let (client, feed) = (Arc::clone(client), Rc::clone(feed));
 	spawn_for(&dialog, async move {
-		match fetch.await {
-			Ok(issues) => {
-				for (section, list) in &lists {
-					let rows = issues
-						.items
-						.iter()
-						.filter(|issue| issue.is_pull_request() == section.lists_pull_requests())
-						.map(|issue| (issue.number.to_string(), issue_label(issue)))
-						.collect();
-					fill(list, rows, section.empty_message());
-				}
-			}
-			Err(error) => {
-				for (section, list) in &lists {
-					fill(list, Vec::new(), &format!("Could not load {}.", section.title().to_lowercase()));
-				}
-				notice::error(&dialog, error, "Could Not Load Issues");
-			}
+		let result = read_on(&client, &feed, vec![section]).await;
+		feed.borrow_mut().loading = false;
+		feed.borrow().show(&Select::Keep);
+		if let Err(error) = result {
+			notice::error(&dialog, error, "Could Not Load More");
 		}
 	});
+}
+
+/// Fetches the pages after those `feed` has while any of `wanted` has gained nothing, up to
+/// [`PAGES_PER_LOAD`], and stops at the list's end.
+#[expect(clippy::future_not_send, reason = "it runs on the UI thread, where the feeds live")]
+async fn read_on<T: DeserializeOwned + Send + 'static>(
+	client: &Arc<Client>,
+	feed: &Shared<T>,
+	mut wanted: Vec<Section>,
+) -> Result<(), Error> {
+	for _ in 0..PAGES_PER_LOAD {
+		if wanted.is_empty() {
+			break;
+		}
+		let Some(cursor) = feed.borrow().next.clone() else {
+			break;
+		};
+		let client = Arc::clone(client);
+		let page = background_blocking(move || client.next_page(&cursor)).await?;
+		let mut inner = feed.borrow_mut();
+		let gained = inner.add(&page.items);
+		inner.next = page.next;
+		wanted.retain(|section| !gained.contains(section));
+	}
+	Ok(())
+}
+
+fn issue_row(section: Section, issue: &Issue) -> Option<(String, String)> {
+	(issue.is_pull_request() == section.lists_pull_requests()).then(|| (issue.number.to_string(), issue_label(issue)))
 }
 
 /// Puts `rows` in `list`, or `message` alone when there are none.
-fn fill(list: &QuietList<String>, rows: Vec<(String, String)>, message: &str) {
+fn fill(list: &QuietList<String>, rows: Rows, message: &str, select: Select<String>) {
 	let rows = if rows.is_empty() { vec![(MESSAGE_KEY.to_owned(), message.to_owned())] } else { rows };
-	list.update_labelled(rows, Select::Start);
+	list.update_labelled(rows, select);
 }
 
 /// Loads commit `sha` with what it changed, and shows it as a page.
