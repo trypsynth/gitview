@@ -665,12 +665,12 @@ impl MainWindow {
 			return;
 		};
 		let fetched = background_blocking(move || match view {
-			View::Notifications => client.notifications(!unread_only).map(Items::Notifications),
-			View::Repositories => client.repositories().map(Items::Repositories),
-			View::Starred => client.starred().map(Items::Repositories),
-			View::Watched => client.watched().map(Items::Repositories),
-			View::Assigned => client.assigned(issue_filter).map(Items::Issues),
-			View::ReviewRequested => client.review_requests(issue_filter).map(Items::Issues),
+			View::Notifications => client.notifications(!unread_only).map(|page| Items::Notifications(page.items)),
+			View::Repositories => client.repositories().map(|page| Items::Repositories(page.items)),
+			View::Starred => client.starred().map(|page| Items::Repositories(page.items)),
+			View::Watched => client.watched().map(|page| Items::Repositories(page.items)),
+			View::Assigned => client.assigned(issue_filter).map(|page| Items::Issues(page.items)),
+			View::ReviewRequested => client.review_requests(issue_filter).map(|page| Items::Issues(page.items)),
 		});
 		let window = self.clone();
 		spawn_for(&self.frame, async move { window.store(view, fetched.await) });

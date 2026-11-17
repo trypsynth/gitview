@@ -159,7 +159,7 @@ fn load_commits(dialog: Dialog, list: Rc<QuietList<String>>, client: Arc<Client>
 	spawn_for(&dialog, async move {
 		match fetch.await {
 			Ok(commits) => {
-				let rows = commits.iter().map(|commit| (commit.sha.clone(), commit_label(commit))).collect();
+				let rows = commits.items.iter().map(|commit| (commit.sha.clone(), commit_label(commit))).collect();
 				fill(&list, rows, Section::Commits.empty_message());
 			}
 			Err(error) => {
@@ -188,6 +188,7 @@ fn load_issues(dialog: Dialog, lists: Vec<IssueList>, client: Arc<Client>, repo:
 			Ok(issues) => {
 				for (section, list) in &lists {
 					let rows = issues
+						.items
 						.iter()
 						.filter(|issue| issue.is_pull_request() == section.lists_pull_requests())
 						.map(|issue| (issue.number.to_string(), issue_label(issue)))
