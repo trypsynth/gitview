@@ -7,7 +7,7 @@ use crate::{
 		CloseReason, Comment, Commit, CommitDetails, Email, Issue, IssueState, Notification, Profile, ProfileUpdate,
 		Repository, SocialAccount, SubjectDetails, User,
 	},
-	page::{Cursor, Kind, Page, next_link},
+	page::{Cursor, Kind, Page, link},
 };
 
 const API_URL: &str = "https://api.github.com";
@@ -16,6 +16,8 @@ const API_VERSION: &str = "2022-11-28";
 // mentions and task lists already in place.
 const HTML_ACCEPT: &str = "application/vnd.github.full+json";
 const USER_AGENT: &str = concat!("gitview/", env!("CARGO_PKG_VERSION"));
+/// How many watched repositories a page holds, the most GitHub allows.
+const WATCHED_PAGE_SIZE: usize = 100;
 
 #[derive(Serialize)]
 struct NewComment<'a> {
@@ -164,8 +166,9 @@ impl Client {
 		self.get(&format!("/repos/{repo}"))
 	}
 
+	/// The signed-in user's repositories, most recently updated first.
 	pub fn repositories(&self) -> Result<Page<Repository>, Error> {
-		self.fetch_page("/user/repos?sort=updated&per_page=100", Kind::Plain)
+		self.fetch_page("/user/repos?sort=updated&direction=desc&per_page=100", Kind::Plain)
 	}
 
 	/// Repositories the signed-in user has starred, most recently starred first.
@@ -173,9 +176,25 @@ impl Client {
 		self.fetch_page("/user/starred?sort=created&direction=desc&per_page=100", Kind::Plain)
 	}
 
-	/// Repositories the signed-in user watches, which GitHub calls subscriptions.
+	/// Repositories the signed-in user watches, which GitHub calls subscriptions, most recently
+	/// watched first.
+	///
+	/// GitHub lists them oldest first and can't be asked otherwise, so the list is read from its
+	/// last page back, each page back to front. The first page says where the last one is.
 	pub fn watched(&self) -> Result<Page<Repository>, Error> {
-		self.fetch_page("/user/subscriptions?per_page=100", Kind::Plain)
+		let (mut first, last) =
+			self.fetch_page_links(&format!("/user/subscriptions?per_page={WATCHED_PAGE_SIZE}"), Kind::Plain, false)?;
+		if let Some(last) = last {
+			let mut page = self.fetch_cursor(&Cursor::new(last, Kind::Plain, true))?;
+			// The last page can hold only a few, which would open the view nearly empty.
+			if page.items.len() < WATCHED_PAGE_SIZE / 2 {
+				self.load_pages(&mut page, 1)?;
+			}
+			return Ok(page);
+		}
+		// One page holds them all.
+		first.items.reverse();
+		Ok(first)
 	}
 
 	/// The newest commits on the default branch of `repo` (`owner/name`). A repository with no
@@ -194,7 +213,9 @@ impl Client {
 
 	/// Issues and pull requests in `repo` (`owner/name`), newest first.
 	pub fn issues(&self, repo: &str, state: IssueState) -> Result<Page<Issue>, Error> {
-		self.fetch_page(&format!("/repos/{repo}/issues?state={}&per_page=100", state.as_parameter()), Kind::Rendered)
+		let path =
+			format!("/repos/{repo}/issues?state={}&sort=created&direction=desc&per_page=100", state.as_parameter());
+		self.fetch_page(&path, Kind::Rendered)
 	}
 
 	/// Issues and pull requests assigned to the signed-in user, across every repository.
@@ -221,7 +242,7 @@ impl Client {
 
 	/// The page `cursor` points at.
 	pub fn next_page<T: DeserializeOwned>(&self, cursor: &Cursor<T>) -> Result<Page<T>, Error> {
-		self.fetch_page(&cursor.path, cursor.kind)
+		self.fetch_cursor(cursor)
 	}
 
 	/// Adds up to `pages` more pages to `page`, stopping at the list's end, so a list can be
@@ -281,32 +302,51 @@ impl Client {
 	fn search(&self, query: &str, state: IssueState) -> Result<Page<Issue>, Error> {
 		let query = format!("{query} {}", state.as_qualifier());
 		self.fetch_page(
-			&format!("/search/issues?advanced_search=true&per_page=100&q={}", query.trim().replace(' ', "+")),
+			&format!(
+				"/search/issues?advanced_search=true&sort=updated&order=desc&per_page=100&q={}",
+				query.trim().replace(' ', "+")
+			),
 			Kind::Search,
 		)
 	}
 
-	/// One page of a list at `path`, with where the next page is, as GitHub's `Link` header says.
+	/// The first page of a list at `path`, read front to back.
 	fn fetch_page<T: DeserializeOwned>(&self, path: &str, kind: Kind) -> Result<Page<T>, Error> {
+		Ok(self.fetch_page_links(path, kind, false)?.0)
+	}
+
+	fn fetch_cursor<T: DeserializeOwned>(&self, cursor: &Cursor<T>) -> Result<Page<T>, Error> {
+		Ok(self.fetch_page_links(&cursor.path, cursor.kind, cursor.backwards)?.0)
+	}
+
+	/// One page of a list at `path`, with where the next page is, as GitHub's `Link` header says,
+	/// and where its last page is. Read `backwards`, the page comes back to front, and the next
+	/// page is the one before it.
+	fn fetch_page_links<T: DeserializeOwned>(
+		&self,
+		path: &str,
+		kind: Kind,
+		backwards: bool,
+	) -> Result<(Page<T>, Option<String>), Error> {
 		// The path alone: the token travels in a header, never in it.
 		tracing::debug!(path, "fetching");
 		let accept = if kind == Kind::Rendered { HTML_ACCEPT } else { "application/vnd.github+json" };
 		let mut response =
 			self.authorize(self.agent.get(format!("{API_URL}{path}"))).header("Accept", accept).call()?;
+		let links = response.headers().get("Link").and_then(|header| header.to_str().ok()).unwrap_or_default();
 		// A link anywhere but the API is never followed, so the token never goes anywhere else.
-		let next = response
-			.headers()
-			.get("Link")
-			.and_then(|header| header.to_str().ok())
-			.and_then(next_link)
-			.and_then(|url| url.strip_prefix(API_URL))
-			.map(|path| Cursor::new(path.to_owned(), kind));
-		let items = if kind == Kind::Search {
+		let path_of = |rel| link(links, rel).and_then(|url| url.strip_prefix(API_URL)).map(str::to_owned);
+		let next = path_of(if backwards { "prev" } else { "next" }).map(|path| Cursor::new(path, kind, backwards));
+		let last = path_of("last");
+		let mut items: Vec<T> = if kind == Kind::Search {
 			response.body_mut().read_json::<SearchResults<T>>()?.items
 		} else {
 			response.body_mut().read_json()?
 		};
-		Ok(Page { items, next })
+		if backwards {
+			items.reverse();
+		}
+		Ok((Page { items, next }, last))
 	}
 
 	fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T, Error> {

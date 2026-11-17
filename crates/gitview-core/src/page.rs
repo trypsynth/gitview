@@ -23,18 +23,21 @@ pub struct Cursor<T> {
 	/// The page's path under the API, never a whole URL, so the token can't travel elsewhere.
 	pub(crate) path: String,
 	pub(crate) kind: Kind,
+	/// Whether the list is read from its last page to its first, each page back to front, for a
+	/// list GitHub can only give oldest first.
+	pub(crate) backwards: bool,
 	items: PhantomData<fn() -> T>,
 }
 
 impl<T> Cursor<T> {
-	pub(crate) const fn new(path: String, kind: Kind) -> Self {
-		Self { path, kind, items: PhantomData }
+	pub(crate) const fn new(path: String, kind: Kind, backwards: bool) -> Self {
+		Self { path, kind, backwards, items: PhantomData }
 	}
 }
 
 impl<T> Clone for Cursor<T> {
 	fn clone(&self) -> Self {
-		Self::new(self.path.clone(), self.kind)
+		Self::new(self.path.clone(), self.kind, self.backwards)
 	}
 }
 
@@ -49,30 +52,33 @@ pub enum Kind {
 	Search,
 }
 
-/// The next page's URL in a `Link` header, such as
+/// The URL a `Link` header gives for `rel`, such as `next` or `last` in
 /// `<https://api.github.com/user/starred?page=2>; rel="next", <...>; rel="last"`.
-pub fn next_link(header: &str) -> Option<&str> {
+pub fn link<'a>(header: &'a str, rel: &str) -> Option<&'a str> {
+	let wanted = format!("rel=\"{rel}\"");
 	header.split(',').find_map(|link| {
 		let (url, params) = link.split_once(';')?;
 		params
 			.split(';')
-			.any(|param| param.trim() == "rel=\"next\"")
+			.any(|param| param.trim() == wanted)
 			.then(|| url.trim().trim_start_matches('<').trim_end_matches('>'))
 	})
 }
 
 #[cfg(test)]
 mod tests {
-	use super::next_link;
+	use super::link;
 
 	#[test]
-	fn the_next_link_is_found_among_the_others() {
+	fn a_link_is_found_by_its_rel_among_the_others() {
 		let header = "<https://api.github.com/user/starred?per_page=100&page=2>; rel=\"next\", \
 		              <https://api.github.com/user/starred?per_page=100&page=5>; rel=\"last\"";
-		assert_eq!(next_link(header), Some("https://api.github.com/user/starred?per_page=100&page=2"));
+		assert_eq!(link(header, "next"), Some("https://api.github.com/user/starred?per_page=100&page=2"));
+		assert_eq!(link(header, "last"), Some("https://api.github.com/user/starred?per_page=100&page=5"));
 		let last_page = "<https://api.github.com/user/starred?per_page=100&page=1>; rel=\"prev\", \
 		                 <https://api.github.com/user/starred?per_page=100&page=1>; rel=\"first\"";
-		assert_eq!(next_link(last_page), None);
-		assert_eq!(next_link(""), None);
+		assert_eq!(link(last_page, "next"), None);
+		assert_eq!(link(last_page, "prev"), Some("https://api.github.com/user/starred?per_page=100&page=1"));
+		assert_eq!(link("", "next"), None);
 	}
 }
