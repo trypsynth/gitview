@@ -113,11 +113,17 @@ fn show<S: FeedSection, T>(feed: &Shared<S, T>, select: &Select<String>) {
 	}
 }
 
-/// Says in each of the feed's lists that its first page couldn't be loaded.
-fn show_failure<S: FeedSection, T>(feed: &Shared<S, T>) {
+/// Says in each of the feed's lists why its first page couldn't be loaded.
+fn show_failure<S: FeedSection, T>(feed: &Shared<S, T>, error: &Error) {
 	let lists: Vec<_> = feed.borrow().lists.iter().map(|(section, list, _)| (*section, Rc::clone(list))).collect();
 	for (section, list) in lists {
-		let message = format!("Could not load {}.", section.title().to_lowercase());
+		let message = match error {
+			Error::Restricted(organization) => format!(
+				"{organization} only lets apps it has approved see this. An owner of {organization} can approve \
+				 Gitview in its settings, under third-party access."
+			),
+			_ => format!("Could not load {}.", section.title().to_lowercase()),
+		};
 		fill(&list, Vec::new(), &message, Select::Start);
 	}
 }
@@ -151,8 +157,11 @@ pub fn start<S: FeedSection, T: DeserializeOwned + Send + 'static>(
 			}
 			Err(error) => {
 				feed.borrow_mut().loading = false;
-				show_failure(&feed);
-				notice::error(&dialog, error, failed_title);
+				show_failure(&feed, &error);
+				// The list says why an organization's restrictions hide it, which needs no alert.
+				if !matches!(error, Error::Restricted(_)) {
+					notice::error(&dialog, error, failed_title);
+				}
 			}
 		}
 	});

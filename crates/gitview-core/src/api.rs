@@ -53,6 +53,23 @@ struct SearchResults<T> {
 	items: Vec<T>,
 }
 
+/// The organization a 403's body names, when it refused because the organization limits what
+/// third-party apps can see.
+fn restricting_organization(body: &str) -> Option<String> {
+	#[derive(Deserialize)]
+	struct Refusal {
+		message: String,
+	}
+	let message = serde_json::from_str::<Refusal>(body).ok()?.message;
+	if !message.contains("OAuth App access restrictions") {
+		return None;
+	}
+	// "... the `accessware` organization has enabled OAuth App access restrictions, ..."
+	let (_, rest) = message.split_once('`')?;
+	let (organization, _) = rest.split_once('`')?;
+	Some(organization.to_owned())
+}
+
 #[derive(Serialize)]
 struct GraphRequest<'a> {
 	query: &'a str,
@@ -251,14 +268,26 @@ impl Client {
 		self.fetch_page(&format!("/users/{login}/starred?sort=created&direction=desc&per_page=100"), Kind::Plain)
 	}
 
-	/// Who follows `login`, most recent first. Only users have followers to list.
+	/// Who follows the user `login`, most recent first.
 	pub fn followers(&self, login: &str) -> Result<Page<User>, Error> {
 		self.connection_page(Connection::Followers, login, None)
 	}
 
-	/// Who `login` follows, most recent first. GitHub lists only the people, not organizations.
+	/// Who follows the organization `login`, newest accounts first. GitHub can't say when anyone
+	/// followed an organization, and lists them by account age.
+	pub fn organization_followers(&self, login: &str) -> Result<Page<User>, Error> {
+		self.newest_first(&format!("/users/{login}/followers?per_page={PAGE_SIZE}"))
+	}
+
+	/// Who `login` follows: the people most recent first, then the organizations, which GitHub
+	/// can't say when they were followed.
 	pub fn following(&self, login: &str) -> Result<Page<User>, Error> {
-		self.connection_page(Connection::Following, login, None)
+		let mut page = self.connection_page(Connection::Following, login, None)?;
+		// Following only organizations leaves the first page of people empty.
+		if page.items.is_empty() {
+			self.load_pages(&mut page, 1)?;
+		}
+		Ok(page)
 	}
 
 	/// The newest commits on the default branch of `repo` (`owner/name`). A repository with no
@@ -400,7 +429,22 @@ impl Client {
 		match &cursor.at {
 			At::Rest { path, kind, backwards } => Ok(self.fetch_page_links(path, *kind, *backwards)?.0),
 			At::Graph { connection, login, after } => self.connection_page(*connection, login, Some(after)),
+			At::FollowedOrganizations { login } => self.followed_organizations(login),
 		}
+	}
+
+	/// The organizations `login` follows, picked out of everyone they follow.
+	fn followed_organizations<T: DeserializeOwned>(&self, login: &str) -> Result<Page<T>, Error> {
+		let mut everyone: Page<serde_json::Value> =
+			self.fetch_page(&format!("/users/{login}/following?per_page={PAGE_SIZE}"), Kind::Plain)?;
+		self.load_pages(&mut everyone, usize::MAX)?;
+		let items = everyone
+			.items
+			.into_iter()
+			.filter(|account| account.get("type").and_then(serde_json::Value::as_str) == Some("Organization"))
+			.map(serde_json::from_value)
+			.collect::<Result<_, _>>()?;
+		Ok(Page { items, next: None })
 	}
 
 	/// A page of `login`'s `connection`, from GitHub's GraphQL API, after the cursor `after`, or
@@ -415,7 +459,7 @@ impl Client {
 		tracing::debug!(login, field, "fetching from GraphQL");
 		let query = format!(
 			"query($login: String!, $after: String) {{ user(login: $login) {{ list: {field}(first: {PAGE_SIZE}, \
-			 after: $after) {{ nodes {{ login name }} pageInfo {{ hasNextPage endCursor }} }} }} }}"
+			 after: $after) {{ nodes {{ login name type: __typename }} pageInfo {{ hasNextPage endCursor }} }} }} }}"
 		);
 		let response: GraphResponse<T> = self
 			.authorize(self.agent.post(format!("{API_URL}/graphql")))
@@ -426,11 +470,12 @@ impl Client {
 			let message = response.errors.into_iter().next().map(|error| error.message);
 			return Err(Error::Graph(message.unwrap_or_else(|| format!("GitHub has no user {login}"))));
 		};
-		let next = list
-			.page_info
-			.end_cursor
-			.filter(|_| list.page_info.has_next_page)
-			.map(|after| Cursor::graph(connection, login.to_owned(), after));
+		let next = match list.page_info.end_cursor.filter(|_| list.page_info.has_next_page) {
+			Some(after) => Some(Cursor::graph(connection, login.to_owned(), after)),
+			// After the people they follow come the organizations.
+			None if connection == Connection::Following => Some(Cursor::followed_organizations(login.to_owned())),
+			None => None,
+		};
 		Ok(Page { items: list.nodes, next })
 	}
 
@@ -446,17 +491,33 @@ impl Client {
 		// The path alone: the token travels in a header, never in it.
 		tracing::debug!(path, "fetching");
 		let accept = if kind == Kind::Rendered { HTML_ACCEPT } else { "application/vnd.github+json" };
-		let request = || self.authorize(self.agent.get(format!("{API_URL}{path}"))).header("Accept", accept).call();
-		let mut response = match request() {
-			// GitHub can time out on a page deep in a very long list, and asks clients to try
-			// again after a server error.
-			Err(ureq::Error::StatusCode(500..=599)) => {
-				tracing::debug!(path, "server error, trying once more");
-				thread::sleep(SERVER_ERROR_WAIT);
-				request()?
-			}
-			result => result?,
+		// Statuses are read here rather than as errors, since a refusal's body says why.
+		let request = || {
+			self.authorize(self.agent.get(format!("{API_URL}{path}")))
+				.header("Accept", accept)
+				.config()
+				.http_status_as_error(false)
+				.build()
+				.call()
 		};
+		let mut response = request()?;
+		// GitHub can time out on a page deep in a very long list, and asks clients to try again
+		// after a server error.
+		if response.status().is_server_error() {
+			tracing::debug!(path, "server error, trying once more");
+			thread::sleep(SERVER_ERROR_WAIT);
+			response = request()?;
+		}
+		let status = response.status().as_u16();
+		if status == 403
+			&& let Some(organization) =
+				response.body_mut().read_to_string().ok().as_deref().and_then(restricting_organization)
+		{
+			return Err(Error::Restricted(organization));
+		}
+		if !response.status().is_success() {
+			return Err(ureq::Error::StatusCode(status).into());
+		}
 		let links = response.headers().get("Link").and_then(|header| header.to_str().ok()).unwrap_or_default();
 		// A link anywhere but the API is never followed, so the token never goes anywhere else.
 		let path_of = |rel| link(links, rel).and_then(|url| url.strip_prefix(API_URL)).map(str::to_owned);
@@ -495,5 +556,18 @@ impl Client {
 
 	fn authorize<B>(&self, request: RequestBuilder<B>) -> RequestBuilder<B> {
 		request.header("Authorization", format!("Bearer {}", self.token)).header("X-GitHub-Api-Version", API_VERSION)
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::restricting_organization;
+
+	#[test]
+	fn an_organizations_app_restrictions_are_told_from_other_refusals() {
+		let restricted = r#"{"message":"Although you appear to have the correct authorization credentials, the `accessware` organization has enabled OAuth App access restrictions, meaning that data access to third-parties is limited.","status":"403"}"#;
+		assert_eq!(restricting_organization(restricted).as_deref(), Some("accessware"));
+		assert_eq!(restricting_organization(r#"{"message":"API rate limit exceeded"}"#), None);
+		assert_eq!(restricting_organization("not json"), None);
 	}
 }

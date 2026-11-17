@@ -38,6 +38,9 @@ pub enum At {
 	},
 	/// A page of one of a user's GraphQL connections, after the GraphQL cursor `after`.
 	Graph { connection: Connection, login: String, after: String },
+	/// The organizations a user follows, all on one page. GraphQL lists only the people, so
+	/// these come from REST after them.
+	FollowedOrganizations { login: String },
 }
 
 /// A user's list that only GraphQL gives in a useful order.
@@ -66,6 +69,10 @@ impl<T> Cursor<T> {
 
 	pub(crate) const fn graph(connection: Connection, login: String, after: String) -> Self {
 		Self { at: At::Graph { connection, login, after }, items: PhantomData }
+	}
+
+	pub(crate) const fn followed_organizations(login: String) -> Self {
+		Self { at: At::FollowedOrganizations { login }, items: PhantomData }
 	}
 }
 

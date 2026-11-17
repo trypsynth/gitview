@@ -19,6 +19,11 @@ pub enum Error {
 	/// GitHub's GraphQL API answered, but with an error instead of what was asked for.
 	#[error("{0}")]
 	Graph(String),
+	#[error(transparent)]
+	Json(#[from] serde_json::Error),
+	/// The organization limits what third-party apps can see, and hasn't approved Gitview.
+	#[error("{0} only lets apps it has approved see this")]
+	Restricted(String),
 }
 
 impl Error {

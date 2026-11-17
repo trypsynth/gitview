@@ -96,11 +96,10 @@ fn show_user_dialog(parent: &dyn WxWidget, client: Arc<Client>, profile: &UserPr
 		.map_or_else(|| login.clone(), |name| format!("{name} ({login})"));
 	let dialog = Dialog::builder(parent, &title).build();
 	let padding = dialog_padding(&dialog);
-	// An organization stars nothing and follows no one, and GitHub lists no organization's
-	// followers newest first, so it shows only its profile and repositories.
+	// An organization stars nothing and follows no one.
 	let shown: Vec<_> = Section::ALL
 		.into_iter()
-		.filter(|section| !profile.is_organization() || matches!(section, Section::Profile | Section::Repositories))
+		.filter(|section| !profile.is_organization() || !matches!(section, Section::Starred | Section::Following))
 		.map(|section| (section, section.title()))
 		.collect();
 	let sections = SectionedLists::new(&dialog, "Sections", &shown);
@@ -112,7 +111,7 @@ fn show_user_dialog(parent: &dyn WxWidget, client: Arc<Client>, profile: &UserPr
 	let close_button = Button::builder(&dialog).with_id(ID_CANCEL).with_label("Close").build();
 	dialog.set_escape_id(ID_CANCEL);
 	feed::fill(sections.list(Section::Profile), profile_rows(profile), "", Select::Start);
-	let feeds = Rc::new(Feeds::new(&sections, lists));
+	let feeds = Rc::new(Feeds::new(&sections, lists, profile.is_organization()));
 	feed::on_reaching_oldest(&sections, lists, &feeds.at_end(dialog, &client));
 	// A repository opens as its own dialog, a person as theirs, and a link in the profile in the
 	// browser.
@@ -196,19 +195,26 @@ struct Feeds {
 	starred: Shared<Section, Repository>,
 	followers: Shared<Section, User>,
 	following: Shared<Section, User>,
+	/// Whether the dialog is an organization's, whose followers GitHub lists differently.
+	organization: bool,
 }
 
 impl Feeds {
-	fn new(sections: &SectionedLists<Section>, lists: Lists) -> Self {
+	fn new(sections: &SectionedLists<Section>, lists: Lists, organization: bool) -> Self {
 		let only = |section| move |shown| shown == section;
 		let repository_row =
 			|_, repository: &Repository| Some((repository.full_name.clone(), repository_label(repository)));
-		let user_row = |_, user: &User| Some((user.login.clone(), user.login.clone()));
+		let user_row = |_, user: &User| {
+			let label =
+				if user.is_organization() { format!("{}, organization", user.login) } else { user.login.clone() };
+			Some((user.login.clone(), label))
+		};
 		Self {
 			repositories: Feed::new(sections, lists, only(Section::Repositories), repository_row),
 			starred: Feed::new(sections, lists, only(Section::Starred), repository_row),
 			followers: Feed::new(sections, lists, only(Section::Followers), user_row),
 			following: Feed::new(sections, lists, only(Section::Following), user_row),
+			organization,
 		}
 	}
 
@@ -242,7 +248,7 @@ impl Feeds {
 
 	/// Loads the first page of `section`'s list of what `login` has.
 	fn start(&self, section: Section, dialog: Dialog, client: &Arc<Client>, login: &str) {
-		let (fetch, login) = (Arc::clone(client), login.to_owned());
+		let (fetch, login, organization) = (Arc::clone(client), login.to_owned(), self.organization);
 		let client = Arc::clone(client);
 		match section {
 			Section::Profile => {}
@@ -264,7 +270,7 @@ impl Feeds {
 				dialog,
 				client,
 				Rc::clone(&self.followers),
-				move || fetch.followers(&login),
+				move || if organization { fetch.organization_followers(&login) } else { fetch.followers(&login) },
 				"Could Not Load Followers",
 			),
 			Section::Following => feed::start(

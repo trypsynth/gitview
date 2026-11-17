@@ -4,6 +4,16 @@ use serde::{Deserialize, Serialize};
 pub struct User {
 	pub login: String,
 	pub name: Option<String>,
+	/// `User` or `Organization`, when GitHub says.
+	#[serde(rename = "type", default)]
+	pub kind: Option<String>,
+}
+
+impl User {
+	#[must_use]
+	pub fn is_organization(&self) -> bool {
+		self.kind.as_deref() == Some("Organization")
+	}
 }
 
 /// Anyone's public profile, as their page on GitHub shows it.
