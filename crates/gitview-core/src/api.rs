@@ -159,6 +159,11 @@ impl Client {
 		Ok(())
 	}
 
+	/// Repository `repo` (`owner/name`), with its name as GitHub spells it.
+	pub fn repository(&self, repo: &str) -> Result<Repository, Error> {
+		self.get(&format!("/repos/{repo}"))
+	}
+
 	pub fn repositories(&self) -> Result<Page<Repository>, Error> {
 		self.fetch_page("/user/repos?sort=updated&per_page=100", Kind::Plain)
 	}

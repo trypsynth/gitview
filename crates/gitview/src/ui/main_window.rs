@@ -44,6 +44,7 @@ const ID_SIGN_OUT: i32 = ID_HIGHEST + 3;
 const ID_PROFILE: i32 = ID_HIGHEST + 4;
 const ID_SETTINGS: i32 = ID_HIGHEST + 5;
 const ID_SHORTCUTS: i32 = ID_HIGHEST + 6;
+const ID_GO_TO_REPOSITORY: i32 = ID_HIGHEST + 7;
 const ID_FILTER_FIRST: i32 = ID_HIGHEST + 10;
 const ACTIONS_MENU: usize = 1;
 const FILTER_MENU: usize = 2;
@@ -341,6 +342,7 @@ impl MainWindow {
 		let window = self.clone();
 		self.frame.on_menu_selected(move |event| match event.get_id() {
 			ID_REFRESH => window.fetch_all(),
+			ID_GO_TO_REPOSITORY => window.go_to_repository(),
 			ID_PROFILE => window.edit_profile(),
 			ID_SETTINGS => window.open_settings(),
 			ID_SHORTCUTS => window.edit_shortcuts(),
@@ -1113,6 +1115,37 @@ impl MainWindow {
 		live_region::announce(self.live_region, message);
 	}
 
+	/// Asks for a repository by name, or a link to it, and opens it. GitHub is asked first, so a
+	/// name that doesn't exist is said so rather than opening an empty repository.
+	fn go_to_repository(&self) {
+		let Some(client) = self.state.borrow().client.clone() else {
+			return;
+		};
+		let Some(answer) = prompt_text(&self.frame, "User/repository:", "Go to Repository") else {
+			return;
+		};
+		let Some(repo) = parse_repository_reference(&answer) else {
+			show_error(&self.frame, format!("\"{}\" isn't a user/repository.", answer.trim()), "Go to Repository");
+			return;
+		};
+		let frame = self.frame;
+		let lookup_client = Arc::clone(&client);
+		let lookup_repo = repo.clone();
+		spawn_for(&frame, async move {
+			match background_blocking(move || lookup_client.repository(&lookup_repo)).await {
+				Ok(repository) => dialogs::open_repository(frame, client, repository.full_name),
+				Err(error) if error.is_not_found() => {
+					show_error(
+						&frame,
+						format!("GitHub has no repository {repo} that you can see."),
+						"Go to Repository",
+					);
+				}
+				Err(error) => notice::error(&frame, error, "Could Not Open Repository"),
+			}
+		});
+	}
+
 	fn close_as_duplicate(&self, client: Arc<Client>, selected: &Selected) {
 		let Some((repo, number)) = selected.issue() else {
 			return;
@@ -1237,8 +1270,9 @@ fn shown(arrangement: &[(View, bool)]) -> Vec<View> {
 }
 
 /// The File menu's items that a key can be bound to, in order: id, command, text and help.
-const FILE_ITEMS: [(i32, Command, &str, &str); 5] = [
+const FILE_ITEMS: [(i32, Command, &str, &str); 6] = [
 	(ID_REFRESH, Command::Refresh, "&Refresh", "Reload the selected view"),
+	(ID_GO_TO_REPOSITORY, Command::GoToRepository, "&Go to Repository...", "Open a repository by its name"),
 	(ID_SETTINGS, Command::Settings, "&Settings...", "Choose which views to show"),
 	(ID_SHORTCUTS, Command::CustomizeShortcuts, "Customize &Keyboard Shortcuts...", "Change Gitview's keys"),
 	(ID_PROFILE, Command::EditProfile, "Edit &Profile...", "Change your public GitHub profile"),
@@ -1251,8 +1285,8 @@ fn build_menu_bar(frame: &Frame, shortcuts: &config::Shortcuts) {
 	let file_menu = Menu::builder().build();
 	for (index, (id, command, label, help)) in FILE_ITEMS.into_iter().enumerate() {
 		file_menu.append(id, &menu_label(label, &command.accelerator(shortcuts)), help, ItemKind::Normal);
-		// Refresh stands apart from the rest, which are about Gitview itself.
-		if index == 0 {
+		// Refresh and Go to Repository stand apart from the rest, which are about Gitview itself.
+		if index == 1 {
 			file_menu.append_separator();
 		}
 	}
@@ -1264,6 +1298,21 @@ fn build_menu_bar(frame: &Frame, shortcuts: &config::Shortcuts) {
 			.append(Menu::builder().build(), "F&ilter")
 			.build(),
 	);
+}
+
+/// Reads a repository's `owner/name` from what was typed: the name itself, or a link to the
+/// repository or anything in it.
+fn parse_repository_reference(text: &str) -> Option<String> {
+	let text = text.trim();
+	let path = ["https://github.com/", "http://github.com/", "github.com/"]
+		.iter()
+		.find_map(|prefix| text.strip_prefix(prefix))
+		.unwrap_or(text);
+	let mut parts = path.split('/').filter(|part| !part.is_empty());
+	let (owner, name) = (parts.next()?, parts.next()?);
+	let name = name.strip_suffix(".git").unwrap_or(name);
+	let valid = |part: &str| !part.is_empty() && !part.chars().any(char::is_whitespace);
+	(valid(owner) && valid(name)).then(|| format!("{owner}/{name}"))
 }
 
 /// Reads an issue reference: `12` or `#12` in `repo`, `owner/name#12`, or a link to it.
@@ -1338,7 +1387,7 @@ fn issue_label(issue: &Issue) -> String {
 
 #[cfg(test)]
 mod tests {
-	use super::{View, moved_message, parse_issue_reference};
+	use super::{View, moved_message, parse_issue_reference, parse_repository_reference};
 
 	#[test]
 	fn a_moved_view_is_placed_by_its_neighbours() {
@@ -1346,6 +1395,17 @@ mod tests {
 		assert_eq!(moved_message(&order, View::Starred), "Moved before Notifications.");
 		assert_eq!(moved_message(&order, View::Notifications), "Moved between Starred and Repositories.");
 		assert_eq!(moved_message(&order, View::Repositories), "Moved after Notifications.");
+	}
+
+	#[test]
+	fn a_repository_is_found_by_its_name_or_a_link_into_it() {
+		let gitview = Some("trypsynth/gitview".to_owned());
+		assert_eq!(parse_repository_reference(" trypsynth/gitview "), gitview);
+		assert_eq!(parse_repository_reference("https://github.com/trypsynth/gitview"), gitview);
+		assert_eq!(parse_repository_reference("github.com/trypsynth/gitview.git"), gitview);
+		assert_eq!(parse_repository_reference("https://github.com/trypsynth/gitview/issues/4"), gitview);
+		assert_eq!(parse_repository_reference("trypsynth"), None);
+		assert_eq!(parse_repository_reference("trypsynth/git view"), None);
 	}
 
 	#[test]

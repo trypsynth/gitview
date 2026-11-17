@@ -18,6 +18,14 @@ pub enum Error {
 	Http(ureq::Error),
 }
 
+impl Error {
+	/// Whether GitHub said what was asked for doesn't exist, or isn't one the sign-in can see.
+	#[must_use]
+	pub const fn is_not_found(&self) -> bool {
+		matches!(self, Self::Http(ureq::Error::StatusCode(404)))
+	}
+}
+
 impl From<ureq::Error> for Error {
 	fn from(error: ureq::Error) -> Self {
 		match error {
