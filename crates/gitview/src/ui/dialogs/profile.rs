@@ -122,7 +122,7 @@ fn show_profile_dialog(parent: &dyn WxWidget, client: Arc<Client>, loaded: Loade
 		if saving.replace(true) {
 			return;
 		}
-		live_region::announce(live_region, "Saving profile.");
+		live_region::announce(live_region, "Saving profile...");
 		// The first choice hides the address, which GitHub takes as an empty one.
 		let email = email
 			.get_selection()
