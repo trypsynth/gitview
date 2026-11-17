@@ -1153,24 +1153,32 @@ impl MainWindow {
 		let Some(answer) = prompt_text(&self.frame, "User/repository:", "Go to Repository") else {
 			return;
 		};
-		let Some(repo) = parse_repository_reference(&answer) else {
+		let Some((owner, name)) = parse_repository_reference(&answer) else {
 			show_error(&self.frame, format!("\"{}\" isn't a user/repository.", answer.trim()), "Go to Repository");
 			return;
 		};
 		let frame = self.frame;
 		let lookup_client = Arc::clone(&client);
-		let lookup_repo = repo.clone();
 		spawn_for(&frame, async move {
-			match background_blocking(move || lookup_client.repository(&lookup_repo)).await {
+			// A bare name is one of the signed-in user's, as gh takes it.
+			let lookup = background_blocking(move || {
+				let owner = match owner {
+					Some(owner) => owner,
+					None => lookup_client.current_user().map_err(|error| (None, error))?.login,
+				};
+				let repo = format!("{owner}/{name}");
+				lookup_client.repository(&repo).map_err(|error| (Some(repo), error))
+			});
+			match lookup.await {
 				Ok(repository) => dialogs::open_repository(frame, client, repository.full_name),
-				Err(error) if error.is_not_found() => {
+				Err((Some(repo), error)) if error.is_not_found() => {
 					show_error(
 						&frame,
 						format!("GitHub has no repository {repo} that you can see."),
 						"Go to Repository",
 					);
 				}
-				Err(error) => notice::error(&frame, error, "Could Not Open Repository"),
+				Err((_, error)) => notice::error(&frame, error, "Could Not Open Repository"),
 			}
 		});
 	}
@@ -1345,19 +1353,25 @@ fn build_menu_bar(frame: &Frame, shortcuts: &config::Shortcuts) {
 	);
 }
 
-/// Reads a repository's `owner/name` from what was typed: the name itself, or a link to the
-/// repository or anything in it.
-fn parse_repository_reference(text: &str) -> Option<String> {
+/// Reads a repository from what was typed: `owner/name`, a link to the repository or anything in
+/// it, or a bare `name`, which, as gh takes it, is one of the signed-in user's. Gives the owner,
+/// when one was typed, and the name.
+fn parse_repository_reference(text: &str) -> Option<(Option<String>, String)> {
 	let text = text.trim();
-	let path = ["https://github.com/", "http://github.com/", "github.com/"]
+	let link = ["https://github.com/", "http://github.com/", "github.com/"]
 		.iter()
-		.find_map(|prefix| text.strip_prefix(prefix))
-		.unwrap_or(text);
-	let mut parts = path.split('/').filter(|part| !part.is_empty());
-	let (owner, name) = (parts.next()?, parts.next()?);
+		.find_map(|prefix| text.strip_prefix(prefix));
+	let mut parts = link.unwrap_or(text).split('/').filter(|part| !part.is_empty());
+	let first = parts.next()?;
+	let (owner, name) = match parts.next() {
+		Some(name) => (Some(first), name),
+		// A link to just an account is to a user, not to a repository of the signed-in user's.
+		None if link.is_none() => (None, first),
+		None => return None,
+	};
 	let name = name.strip_suffix(".git").unwrap_or(name);
 	let valid = |part: &str| !part.is_empty() && !part.chars().any(char::is_whitespace);
-	(valid(owner) && valid(name)).then(|| format!("{owner}/{name}"))
+	(owner.is_none_or(valid) && valid(name)).then(|| (owner.map(str::to_owned), name.to_owned()))
 }
 
 /// Reads a username from what was typed: the login itself, an `@mention`, or a link to their
@@ -1457,13 +1471,20 @@ mod tests {
 
 	#[test]
 	fn a_repository_is_found_by_its_name_or_a_link_into_it() {
-		let gitview = Some("trypsynth/gitview".to_owned());
+		let gitview = Some((Some("trypsynth".to_owned()), "gitview".to_owned()));
 		assert_eq!(parse_repository_reference(" trypsynth/gitview "), gitview);
 		assert_eq!(parse_repository_reference("https://github.com/trypsynth/gitview"), gitview);
 		assert_eq!(parse_repository_reference("github.com/trypsynth/gitview.git"), gitview);
 		assert_eq!(parse_repository_reference("https://github.com/trypsynth/gitview/issues/4"), gitview);
-		assert_eq!(parse_repository_reference("trypsynth"), None);
 		assert_eq!(parse_repository_reference("trypsynth/git view"), None);
+	}
+
+	#[test]
+	fn a_bare_name_is_one_of_your_own_but_a_link_to_an_account_is_not() {
+		assert_eq!(parse_repository_reference(" gitview "), Some((None, "gitview".to_owned())));
+		assert_eq!(parse_repository_reference("gitview.git"), Some((None, "gitview".to_owned())));
+		assert_eq!(parse_repository_reference("https://github.com/trypsynth"), None);
+		assert_eq!(parse_repository_reference("git view"), None);
 	}
 
 	#[test]
