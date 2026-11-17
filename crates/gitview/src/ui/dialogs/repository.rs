@@ -17,8 +17,8 @@ use super::{open_issue, page::show_page};
 use crate::{
 	config,
 	ui::{
-		feed::{self, Feed, FeedSection},
-		notice,
+		feed::{self, Feed, FeedSection, RowActions},
+		live, notice,
 		sectioned::SectionedLists,
 		text::{comment_count, count, local_time},
 		web,
@@ -126,18 +126,9 @@ pub fn open_repository<P: WxWidget + WxEvtHandler + Copy + 'static>(parent: P, c
 		})
 	};
 	feed::on_reaching_oldest(&sections, lists, &at_end);
-	// A commit opens as a page, an issue or pull request as its thread.
-	let open: Rc<dyn Fn(Section, String)> = {
-		let (client, repo) = (Arc::clone(&client), repo.clone());
-		Rc::new(move |section, key| {
-			if section == Section::Commits {
-				open_commit(dialog, Arc::clone(&client), repo.clone(), key);
-			} else if let Ok(number) = key.parse() {
-				open_issue(dialog, Arc::clone(&client), repo.clone(), number);
-			}
-		})
-	};
-	feed::on_open(&sections, &open);
+	// Speaks what copying did. Made after the lists, so no screen reader takes it for a label.
+	let live_region = live::live_region(&dialog);
+	feed::on_rows(&sections, live_region, row_actions(dialog, &client, &repo));
 	let (commits_client, commits_repo) = (Arc::clone(&client), repo.clone());
 	feed::start(
 		dialog,
@@ -181,6 +172,29 @@ pub fn open_repository<P: WxWidget + WxEvtHandler + Copy + 'static>(parent: P, c
 	sections.current_list().set_focus();
 	dialog.show_modal();
 	dialog.destroy();
+}
+
+/// What the dialog's rows do: a commit opens as a page, an issue or pull request as its thread,
+/// and each copies its link on GitHub.
+fn row_actions(dialog: Dialog, client: &Arc<Client>, repo: &str) -> RowActions<Section> {
+	let (client, open_repo) = (Arc::clone(client), repo.to_owned());
+	let open = Box::new(move |section, key: String| {
+		if section == Section::Commits {
+			open_commit(dialog, Arc::clone(&client), open_repo.clone(), key);
+		} else if let Ok(number) = key.parse() {
+			open_issue(dialog, Arc::clone(&client), open_repo.clone(), number);
+		}
+	});
+	let repo = repo.to_owned();
+	let link = Box::new(move |section: Section, key: &str| {
+		let kind = match section {
+			Section::Commits => "commit",
+			_ if section.lists_pull_requests() => "pull",
+			_ => "issues",
+		};
+		format!("https://github.com/{repo}/{kind}/{key}")
+	});
+	RowActions { open, link }
 }
 
 fn issue_row(section: Section, issue: &Issue) -> Option<(String, String)> {

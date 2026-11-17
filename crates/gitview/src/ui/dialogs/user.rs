@@ -21,8 +21,8 @@ use super::open_repository;
 use crate::{
 	config::{self, Lists},
 	ui::{
-		feed::{self, Feed, FeedSection, Rows, Shared},
-		notice,
+		feed::{self, Feed, FeedSection, RowActions, Rows, Shared},
+		live, notice,
 		sectioned::SectionedLists,
 		text::{local_time, repository_label},
 	},
@@ -115,9 +115,9 @@ fn show_user_dialog(parent: &dyn WxWidget, client: Arc<Client>, profile: &UserPr
 	feed::on_reaching_oldest(&sections, lists, &feeds.at_end(dialog, &client));
 	// A repository opens as its own dialog, a person as theirs, and a link in the profile in the
 	// browser.
-	let open: Rc<dyn Fn(Section, String)> = {
+	let open = {
 		let client = Arc::clone(&client);
-		Rc::new(move |section, key| match section {
+		Box::new(move |section, key: String| match section {
 			Section::Profile => {
 				if key.starts_with("https://") || key.starts_with("http://") {
 					launch_default_browser(&key, BrowserLaunchFlags::Default);
@@ -127,7 +127,17 @@ fn show_user_dialog(parent: &dyn WxWidget, client: Arc<Client>, profile: &UserPr
 			Section::Followers | Section::Following => open_user(dialog, Arc::clone(&client), key),
 		})
 	};
-	feed::on_open(&sections, &open);
+	// A profile row that is a link copies it, and anything else in the profile copies the
+	// profile's own.
+	let profile_url = profile.html_url.clone();
+	let link = Box::new(move |section: Section, key: &str| match section {
+		Section::Profile if key.starts_with("https://") || key.starts_with("http://") => key.to_owned(),
+		Section::Profile => profile_url.clone(),
+		_ => format!("https://github.com/{key}"),
+	});
+	// Speaks what copying did. Made after the lists, so no screen reader takes it for a label.
+	let live_region = live::live_region(&dialog);
+	feed::on_rows(&sections, live_region, RowActions { open, link });
 	feeds.start(Section::Repositories, dialog, &client, &login);
 	// The rest wait until someone looks: a popular account's followers run to thousands.
 	// The profile is filled and the repositories asked for already.

@@ -26,7 +26,7 @@ pub enum Command {
 
 impl Command {
 	/// Every command, in the order Customize Keyboard Shortcuts lists them.
-	pub const ALL: [Self; 23] = [
+	pub const ALL: [Self; 24] = [
 		Self::Item(Action::Open),
 		Self::Item(Action::Comment),
 		Self::Item(Action::CloseCompleted),
@@ -39,6 +39,7 @@ impl Command {
 		Self::Item(Action::Unsubscribe),
 		Self::Item(Action::Star),
 		Self::Item(Action::Watch),
+		Self::Item(Action::Copy),
 		Self::Item(Action::CopyLink),
 		Self::Item(Action::OpenInBrowser),
 		Self::GoToRepository,
@@ -68,6 +69,7 @@ impl Command {
 				Action::Unsubscribe => "unsubscribe",
 				Action::Star | Action::Unstar => "star",
 				Action::Watch | Action::Unwatch => "watch",
+				Action::Copy => "copy",
 				Action::CopyLink => "copy_link",
 				Action::OpenInBrowser => "open_in_browser",
 			},
@@ -99,6 +101,7 @@ impl Command {
 				Action::Unsubscribe => "Unsubscribe",
 				Action::Star | Action::Unstar => "Star or unstar",
 				Action::Watch | Action::Unwatch => "Watch or unwatch",
+				Action::Copy => "Copy",
 				Action::CopyLink => "Copy link",
 				Action::OpenInBrowser => "Open in browser",
 			},
@@ -120,6 +123,7 @@ impl Command {
 			Self::Item(Action::Open) => (false, false, "Enter"),
 			Self::Item(Action::Comment) => (true, false, "R"),
 			Self::Item(Action::MarkDone) => (false, false, "Delete"),
+			Self::Item(Action::Copy) => (true, false, "C"),
 			Self::Item(Action::CopyLink) => (true, true, "C"),
 			Self::Item(Action::OpenInBrowser) => (true, false, "B"),
 			Self::GoToRepository => (true, false, "G"),
@@ -159,6 +163,7 @@ mod tests {
 		assert_eq!(key(Command::Item(Action::Open)), "Enter");
 		assert_eq!(key(Command::Item(Action::Comment)), "Ctrl+R");
 		assert_eq!(key(Command::Item(Action::MarkDone)), "Delete");
+		assert_eq!(key(Command::Item(Action::Copy)), "Ctrl+C");
 		assert_eq!(key(Command::Item(Action::CopyLink)), "Ctrl+Shift+C");
 		assert_eq!(key(Command::Item(Action::OpenInBrowser)), "Ctrl+B");
 		assert_eq!(key(Command::GoToRepository), "Ctrl+G");

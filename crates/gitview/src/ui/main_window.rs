@@ -1053,6 +1053,16 @@ impl MainWindow {
 				let message = if watching { "Watching." } else { "No longer watching." };
 				self.change(message, None, move || client.set_watching(&repository.full_name, watching));
 			}
+			Action::Copy => {
+				let Some(label) = self.current_list().selected_label() else {
+					return;
+				};
+				if Clipboard::get().set_text(&label) {
+					self.announce("Copied.");
+				} else {
+					notice::error(&self.frame, "Gitview couldn't copy the item.", "Could Not Copy");
+				}
+			}
 			Action::CopyLink => {
 				let window = self.clone();
 				self.with_link(client, &selected, move |url| {

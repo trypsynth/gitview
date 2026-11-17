@@ -9,13 +9,14 @@ use std::{
 };
 
 use gitview_core::{Client, Cursor, Error, Page};
+use key_chord::KeyChord;
 use quiet_list::{QuietList, Select};
 use serde::de::DeserializeOwned;
 use wx_utils::tasks::{background_blocking, spawn_for};
-use wxdragon::prelude::*;
+use wxdragon::{clipboard::Clipboard, prelude::*};
 
-use super::{dialogs::is_plain_enter, notice, sectioned::SectionedLists};
-use crate::config::Lists;
+use super::{actions::Action, dialogs::is_plain_enter, keymap::Command, notice, sectioned::SectionedLists};
+use crate::config::{self, Lists};
 
 /// The key of the row shown in place of items. It is always the only row, so it cannot be
 /// mistaken for an item's key.
@@ -240,26 +241,73 @@ pub fn on_reaching_oldest<S: FeedSection>(sections: &SectionedLists<S>, lists: L
 	}
 }
 
-/// Runs `open` with a section and the selected row's key on Enter or a double-click. A message
-/// row has no key, so it opens nothing.
-pub fn on_open<S: FeedSection>(sections: &SectionedLists<S>, open: &Rc<dyn Fn(S, String)>) {
+/// The link to the item a row of a section shows, by the row's key.
+pub type Link<S> = Box<dyn Fn(S, &str) -> String>;
+
+/// What a dialog's rows do.
+pub struct RowActions<S> {
+	/// Runs with a section and the chosen row's key, on Enter or a double-click.
+	pub open: Box<dyn Fn(S, String)>,
+	pub link: Link<S>,
+}
+
+/// Opens rows on Enter or a double-click, and copies a row, or its link, on the keys the main
+/// window's Copy and Copy link have. A message row has no key, so it opens nothing and has no
+/// link, but copies like any other row. What copying did is said through `live_region`.
+pub fn on_rows<S: FeedSection>(sections: &SectionedLists<S>, live_region: StaticText, actions: RowActions<S>) {
+	let actions = Rc::new(actions);
+	let shortcuts = config::load().shortcuts;
+	let (copy, copy_link) =
+		(Command::Item(Action::Copy).chord(&shortcuts), Command::Item(Action::CopyLink).chord(&shortcuts));
 	for (section, list) in sections.lists() {
 		let opener = {
-			let (list, open) = (Rc::downgrade(list), Rc::clone(open));
+			let (list, actions) = (Rc::downgrade(list), Rc::clone(&actions));
 			Rc::new(move || {
 				if let Some(key) = Weak::upgrade(&list).and_then(|list| list.selected()).filter(|key| !key.is_empty()) {
-					open(section, key);
+					(actions.open)(section, key);
 				}
 			})
 		};
 		let open_on_activate = Rc::clone(&opener);
 		list.on_activate(move || open_on_activate());
+		let (reached, actions, copy, copy_link) =
+			(Rc::downgrade(list), Rc::clone(&actions), copy.clone(), copy_link.clone());
 		list.on_key_down(move |event| {
-			let enter = is_plain_enter(event);
-			if enter {
+			if is_plain_enter(event) {
 				opener();
+				return true;
 			}
-			enter
+			let (WindowEventData::Keyboard(key), Some(list)) = (event, reached.upgrade()) else {
+				return false;
+			};
+			let Some(code) = key.get_key_code() else {
+				return false;
+			};
+			let pressed = |chord: &Option<KeyChord>| {
+				chord
+					.as_ref()
+					.is_some_and(|chord| chord.matches(code, key.control_down(), key.alt_down(), key.shift_down()))
+			};
+			if pressed(&copy) {
+				if let Some(label) = list.selected_label() {
+					copy_text(live_region, &label, "Copied.");
+				}
+			} else if pressed(&copy_link) {
+				let key = list.selected().filter(|key| !key.is_empty());
+				match key.map(|key| (actions.link)(section, &key)) {
+					Some(url) => copy_text(live_region, &url, "Link copied."),
+					None => live_region::announce(live_region, "No link to copy."),
+				}
+			} else {
+				return false;
+			}
+			true
 		});
 	}
+}
+
+/// Puts `text` on the clipboard, and says `done`, or that it couldn't.
+fn copy_text(live_region: StaticText, text: &str, done: &str) {
+	let message = if Clipboard::get().set_text(text) { done } else { "Gitview couldn't copy that." };
+	live_region::announce(live_region, message);
 }

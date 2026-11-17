@@ -56,12 +56,13 @@ pub enum Action {
 	Unstar,
 	Watch,
 	Unwatch,
+	Copy,
 	CopyLink,
 	OpenInBrowser,
 }
 
 impl Action {
-	const ALL: [Self; 16] = [
+	const ALL: [Self; 17] = [
 		Self::Open,
 		Self::Comment,
 		Self::CloseCompleted,
@@ -76,6 +77,7 @@ impl Action {
 		Self::Unstar,
 		Self::Watch,
 		Self::Unwatch,
+		Self::Copy,
 		Self::CopyLink,
 		Self::OpenInBrowser,
 	];
@@ -104,6 +106,7 @@ impl Action {
 			Self::Unstar => "Uns&tar",
 			Self::Watch => "&Watch",
 			Self::Unwatch => "Un&watch",
+			Self::Copy => "Cop&y",
 			Self::CopyLink => "Copy &link",
 			Self::OpenInBrowser => "Open in &browser",
 		}
@@ -125,6 +128,7 @@ impl Action {
 			Self::Unstar => "Remove your star",
 			Self::Watch => "Get notified of all activity in the repository",
 			Self::Unwatch => "Stop watching the repository",
+			Self::Copy => "Copy the item as the list says it",
 			Self::CopyLink => "Copy the link to the item",
 			Self::OpenInBrowser => "Show the item on GitHub",
 		}
@@ -175,7 +179,12 @@ fn entries(selected: &Selected, marks: Marks) -> Vec<Entry> {
 		}
 		entries.extend([Entry::Action(Action::MarkDone), Entry::Action(Action::Unsubscribe)]);
 	}
-	entries.extend([Entry::Separator, Entry::Action(Action::CopyLink), Entry::Action(Action::OpenInBrowser)]);
+	entries.extend([
+		Entry::Separator,
+		Entry::Action(Action::Copy),
+		Entry::Action(Action::CopyLink),
+		Entry::Action(Action::OpenInBrowser),
+	]);
 	entries
 }
 
