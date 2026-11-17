@@ -37,6 +37,8 @@ impl Config {
 pub struct Shortcuts {
 	/// System-wide hotkeys, which work whatever has focus.
 	pub global: BTreeMap<String, String>,
+	/// Keys for what the main window's menus do.
+	pub window: BTreeMap<String, String>,
 }
 
 /// Which views the main window lists, as view ids.

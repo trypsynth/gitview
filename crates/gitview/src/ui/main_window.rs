@@ -12,7 +12,7 @@ use gitview_core::{
 use key_chord::KeyChord;
 use quiet_list::{QuietList, Select};
 use wx_utils::{
-	post_to_ui, prompt_text, show_error,
+	menu_label, post_to_ui, prompt_text, set_menu_item_label, show_error,
 	tasks::{Queue, background_blocking, sleep, spawn_for, spawn_local},
 };
 use wxdragon::{
@@ -28,6 +28,7 @@ use super::{
 	actions::{self, Action, Marks, Selected},
 	dialogs,
 	hotkeys::{GlobalAction, Hotkeys},
+	keymap::Command,
 	live,
 	sectioned::SectionedLists,
 	text::comment_count,
@@ -40,7 +41,6 @@ const ID_REFRESH: i32 = ID_HIGHEST + 2;
 const ID_SIGN_OUT: i32 = ID_HIGHEST + 3;
 const ID_PROFILE: i32 = ID_HIGHEST + 4;
 const ID_SETTINGS: i32 = ID_HIGHEST + 5;
-#[cfg(windows)]
 const ID_SHORTCUTS: i32 = ID_HIGHEST + 6;
 const ID_FILTER_FIRST: i32 = ID_HIGHEST + 10;
 const ACTIONS_MENU: usize = 1;
@@ -184,6 +184,8 @@ pub struct MainWindow {
 	#[cfg(not(target_os = "macos"))]
 	tray: Rc<Tray>,
 	hotkeys: Rc<Hotkeys>,
+	/// The keys bound differently from the defaults, as the settings hold them.
+	shortcuts: Rc<RefCell<config::Shortcuts>>,
 	/// Every change Gitview makes on GitHub goes through here, one at a time, so changes arrive
 	/// in the order the user made them, such as a star and the unstar after it.
 	writes: Queue,
@@ -195,9 +197,10 @@ impl MainWindow {
 	/// this one forward instead.
 	pub fn open(door: Option<doorbell::Door>) {
 		let frame = Frame::builder().with_title("Gitview").with_size(WINDOW_SIZE).build();
-		build_menu_bar(&frame);
+		let config = config::load();
+		build_menu_bar(&frame, &config.shortcuts);
 		let panel = Panel::builder(&frame).build();
-		let settings = config::load().views;
+		let settings = config.views;
 		let arrangement = view::arrange(&settings.order, &settings.hidden);
 		let first = shown(&arrangement)[0];
 		// Views, then the items in the one chosen; opening an item shows it in a dialog of its own.
@@ -221,6 +224,7 @@ impl MainWindow {
 			#[cfg(not(target_os = "macos"))]
 			tray,
 			hotkeys: Rc::default(),
+			shortcuts: Rc::new(RefCell::new(config.shortcuts)),
 			writes: Queue::new(),
 			state: Rc::new(RefCell::new(state)),
 		};
@@ -231,7 +235,7 @@ impl MainWindow {
 		frame.show(true);
 		window.sections.focus_sections();
 		OPEN_WINDOW.set(Some(window.clone()));
-		window.register_hotkeys(&config::load().shortcuts);
+		window.register_hotkeys(&window.shortcuts.borrow());
 		if let Some(door) = door {
 			// Gitview opens no files, so whatever another copy was started with, it means "come
 			// forward".
@@ -269,7 +273,6 @@ impl MainWindow {
 			ID_REFRESH => window.fetch_all(),
 			ID_PROFILE => window.edit_profile(),
 			ID_SETTINGS => window.open_settings(),
-			#[cfg(windows)]
 			ID_SHORTCUTS => window.edit_shortcuts(),
 			ID_SIGN_OUT => window.sign_out(),
 			ID_EXIT => window.frame.close(false),
@@ -343,18 +346,19 @@ impl MainWindow {
 		}
 	}
 
-	/// Lets the user change the global hotkeys, then saves and registers whatever they chose.
-	#[cfg(windows)]
+	/// Lets the user change Gitview's keys, then saves them and puts them to work: in the menus
+	/// straight away, and as hotkeys when those changed.
 	fn edit_shortcuts(&self) {
-		let mut config = config::load();
-		let Some(shortcuts) = dialogs::show_shortcuts_dialog(&self.frame, &config.shortcuts) else {
+		let current = self.shortcuts.borrow().clone();
+		let Some(shortcuts) = dialogs::show_shortcuts_dialog(&self.frame, &current) else {
 			return;
 		};
-		if shortcuts == config.shortcuts {
+		if shortcuts == current {
 			return;
 		}
-		config.shortcuts = shortcuts;
 		tracing::info!("shortcuts changed");
+		let mut config = config::load();
+		config.shortcuts = shortcuts.clone();
 		if let Err(error) = config::save(&config) {
 			notice::warning(
 				&self.frame,
@@ -362,7 +366,23 @@ impl MainWindow {
 				"Shortcuts Not Saved",
 			);
 		}
-		self.register_hotkeys(&config.shortcuts);
+		*self.shortcuts.borrow_mut() = shortcuts;
+		self.label_file_menu();
+		self.update_actions_menu();
+		if self.shortcuts.borrow().global != current.global {
+			self.register_hotkeys(&self.shortcuts.borrow());
+		}
+	}
+
+	/// Puts the keys the settings bind beside the File menu's items, which also makes them work.
+	fn label_file_menu(&self) {
+		let Some(menu_bar) = self.frame.get_menu_bar() else {
+			return;
+		};
+		let shortcuts = self.shortcuts.borrow();
+		for (id, command, label, _) in FILE_ITEMS {
+			set_menu_item_label(&menu_bar, id, label, &command.accelerator(&shortcuts));
+		}
 	}
 
 	fn run_global(&self, action: GlobalAction) {
@@ -718,14 +738,15 @@ impl MainWindow {
 		};
 		let selected = self.selected();
 		let marks = selected.as_ref().map(|selected| self.marks(selected)).unwrap_or_default();
-		menu_bar.replace(ACTIONS_MENU, actions::menu(selected.as_ref(), marks), "&Actions");
+		let menu = actions::menu(selected.as_ref(), marks, &self.shortcuts.borrow());
+		menu_bar.replace(ACTIONS_MENU, menu, "&Actions");
 	}
 
 	fn show_context_menu(&self) {
 		let Some(selected) = self.selected() else {
 			return;
 		};
-		let mut menu = actions::menu(Some(&selected), self.marks(&selected));
+		let mut menu = actions::menu(Some(&selected), self.marks(&selected), &self.shortcuts.borrow());
 		self.current_list().popup_menu(&mut menu);
 		menu.destroy_menu();
 	}
@@ -973,27 +994,26 @@ fn shown(arrangement: &[(View, bool)]) -> Vec<View> {
 	if shown.is_empty() { arrangement.iter().map(|(view, _)| *view).collect() } else { shown }
 }
 
-/// Builds the menu bar. The Actions and Filter menus start empty, since what they hold depends
-/// on the selected item and view.
-fn build_menu_bar(frame: &Frame) {
+/// The File menu's items that a key can be bound to, in order: id, command, text and help.
+const FILE_ITEMS: [(i32, Command, &str, &str); 5] = [
+	(ID_REFRESH, Command::Refresh, "&Refresh", "Reload the selected view"),
+	(ID_SETTINGS, Command::Settings, "&Settings...", "Choose which views to show"),
+	(ID_SHORTCUTS, Command::CustomizeShortcuts, "Customize &Keyboard Shortcuts...", "Change Gitview's keys"),
+	(ID_PROFILE, Command::EditProfile, "Edit &Profile...", "Change your public GitHub profile"),
+	(ID_SIGN_OUT, Command::SignOut, "Sign O&ut", "Forget your GitHub sign-in"),
+];
+
+/// Builds the menu bar with the keys `shortcuts` binds. The Actions and Filter menus start
+/// empty, since what they hold depends on the selected item and view.
+fn build_menu_bar(frame: &Frame, shortcuts: &config::Shortcuts) {
 	let file_menu = Menu::builder().build();
-	file_menu.append(ID_REFRESH, "&Refresh\tF5", "Reload the selected view", ItemKind::Normal);
-	file_menu.append_separator();
-	file_menu.append(ID_SETTINGS, "&Settings...\tCtrl+,", "Choose which views to show", ItemKind::Normal);
-	#[cfg(windows)]
-	file_menu.append(
-		ID_SHORTCUTS,
-		"Customize &Keyboard Shortcuts...",
-		"Change the keys that work from anywhere",
-		ItemKind::Normal,
-	);
-	file_menu.append(
-		ID_PROFILE,
-		"Edit &Profile...\tCtrl+Shift+E",
-		"Change your public GitHub profile",
-		ItemKind::Normal,
-	);
-	file_menu.append(ID_SIGN_OUT, "Sign O&ut", "Forget your GitHub sign-in", ItemKind::Normal);
+	for (index, (id, command, label, help)) in FILE_ITEMS.into_iter().enumerate() {
+		file_menu.append(id, &menu_label(label, &command.accelerator(shortcuts)), help, ItemKind::Normal);
+		// Refresh stands apart from the rest, which are about Gitview itself.
+		if index == 0 {
+			file_menu.append_separator();
+		}
+	}
 	file_menu.append(ID_EXIT, "E&xit", "Close Gitview", ItemKind::Normal);
 	frame.set_menu_bar(
 		MenuBar::builder()

@@ -1,49 +1,96 @@
-//! Gitview's side of wx-utils' Customize Keyboard Shortcuts dialog. For now it holds the
-//! system-wide hotkeys, the only keys Gitview keeps in its settings.
+//! Gitview's side of wx-utils' Customize Keyboard Shortcuts dialog: a tab for the main window's
+//! keys, and on Windows one for the system-wide hotkeys, which fire over the window too and so
+//! can't share a key with it.
+
+use std::collections::BTreeMap;
 
 use wx_utils::shortcuts::{KeyChord, ShortcutModel, TabScope};
 use wxdragon::prelude::*;
 
-use crate::{config::Shortcuts, ui::hotkeys::GlobalAction};
+use crate::{
+	config::Shortcuts,
+	ui::{hotkeys::GlobalAction, keymap::Command},
+};
+
+const WINDOW_TAB: usize = 0;
+
+/// A row in the dialog: something in the window's menus, or a hotkey.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Row {
+	Window(Command),
+	Global(GlobalAction),
+}
 
 /// The shortcuts in the settings, as the dialog edits them.
 #[derive(Clone)]
 struct Model(Shortcuts);
 
+impl Model {
+	/// Where in the settings `row`'s key is kept, and its id there.
+	const fn binding(&mut self, row: Row) -> (&mut BTreeMap<String, String>, &'static str) {
+		match row {
+			Row::Window(command) => (&mut self.0.window, command.id()),
+			Row::Global(action) => (&mut self.0.global, action.id()),
+		}
+	}
+}
+
 impl ShortcutModel for Model {
-	type Action = GlobalAction;
+	type Action = Row;
 
+	/// Hotkeys only work on Windows, so their tab only shows there.
 	fn tabs(&self) -> Vec<String> {
-		vec!["Global".to_owned()]
+		let mut tabs = vec!["Main window".to_owned()];
+		if cfg!(windows) {
+			tabs.push("Global".to_owned());
+		}
+		tabs
 	}
 
-	fn tab_scope(&self, _tab: usize) -> TabScope {
-		TabScope::Global
+	fn tab_scope(&self, tab: usize) -> TabScope {
+		if tab == WINDOW_TAB { TabScope::Mode(0) } else { TabScope::Global }
 	}
 
-	fn actions(&self, _tab: usize) -> Vec<GlobalAction> {
-		GlobalAction::ALL.to_vec()
+	fn actions(&self, tab: usize) -> Vec<Row> {
+		if tab == WINDOW_TAB {
+			Command::ALL.into_iter().map(Row::Window).collect()
+		} else {
+			GlobalAction::ALL.into_iter().map(Row::Global).collect()
+		}
 	}
 
-	fn action_name(&self, action: GlobalAction) -> String {
-		action.name().to_owned()
+	fn action_name(&self, row: Row) -> String {
+		match row {
+			Row::Window(command) => command.name(),
+			Row::Global(action) => action.name(),
+		}
+		.to_owned()
 	}
 
-	fn chord(&self, _tab: usize, action: GlobalAction) -> Option<KeyChord> {
-		action.chord(&self.0)
+	fn chord(&self, _tab: usize, row: Row) -> Option<KeyChord> {
+		match row {
+			Row::Window(command) => command.chord(&self.0),
+			Row::Global(action) => action.chord(&self.0),
+		}
 	}
 
-	fn set_chord(&mut self, _tab: usize, action: GlobalAction, chord: Option<KeyChord>) {
+	fn set_chord(&mut self, _tab: usize, row: Row, chord: Option<KeyChord>) {
 		let chord = chord.map_or_else(|| "none".to_owned(), |chord| chord.to_shortcut_string());
-		self.0.global.insert(action.id().to_owned(), chord);
+		let (keys, id) = self.binding(row);
+		keys.insert(id.to_owned(), chord);
 	}
 
-	fn reset_action(&mut self, _tab: usize, action: GlobalAction) {
-		self.0.global.remove(action.id());
+	fn reset_action(&mut self, _tab: usize, row: Row) {
+		let (keys, id) = self.binding(row);
+		keys.remove(id);
 	}
 
-	fn reset_all(&mut self, _tab: usize) {
-		self.0.global.clear();
+	fn reset_all(&mut self, tab: usize) {
+		if tab == WINDOW_TAB {
+			self.0.window.clear();
+		} else {
+			self.0.global.clear();
+		}
 	}
 }
 
@@ -57,18 +104,32 @@ pub fn show_shortcuts_dialog(parent: &dyn WxWidget, shortcuts: &Shortcuts) -> Op
 mod tests {
 	use wx_utils::shortcuts::{KeyChord, ShortcutModel};
 
-	use super::Model;
-	use crate::{config::Shortcuts, ui::hotkeys::GlobalAction};
+	use super::{Model, Row};
+	use crate::{
+		config::Shortcuts,
+		ui::{actions::Action, hotkeys::GlobalAction, keymap::Command},
+	};
 
 	#[test]
 	fn edits_survive_as_settings_and_reset_goes_back_to_the_default() {
 		let mut model = Model(Shortcuts::default());
-		let action = GlobalAction::ShowHide;
-		model.set_chord(0, action, Some(KeyChord::new(true, false, true, "F12")));
+		let row = Row::Global(GlobalAction::ShowHide);
+		model.set_chord(1, row, Some(KeyChord::new(true, false, true, "F12")));
 		assert_eq!(model.0.global.get("show_hide").map(String::as_str), Some("Ctrl+Shift+F12"));
-		model.set_chord(0, action, None);
-		assert_eq!(model.chord(0, action), None, "clearing a key keeps it unbound rather than defaulted");
-		model.reset_action(0, action);
-		assert_eq!(model.chord(0, action), Some(action.default_chord()));
+		model.set_chord(1, row, None);
+		assert_eq!(model.chord(1, row), None, "clearing a key keeps it unbound rather than defaulted");
+		model.reset_action(1, row);
+		assert_eq!(model.chord(1, row), Some(GlobalAction::ShowHide.default_chord()));
+	}
+
+	#[test]
+	fn the_window_tab_edits_the_window_keys_alone() {
+		let mut model = Model(Shortcuts::default());
+		let row = Row::Window(Command::Item(Action::Comment));
+		model.set_chord(0, row, Some(KeyChord::new(true, false, false, "M")));
+		assert_eq!(model.0.window.get("comment").map(String::as_str), Some("Ctrl+M"));
+		assert!(model.0.global.is_empty());
+		model.reset_all(0);
+		assert!(model.0.window.is_empty());
 	}
 }

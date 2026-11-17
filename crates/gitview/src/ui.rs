@@ -1,6 +1,7 @@
 mod actions;
 mod dialogs;
 mod hotkeys;
+mod keymap;
 mod live;
 mod main_window;
 mod notice;

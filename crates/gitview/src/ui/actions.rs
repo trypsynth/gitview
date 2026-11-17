@@ -2,7 +2,11 @@
 //! menu and the Item menu, so every action has a place in the menu bar and a shortcut there.
 
 use gitview_core::models::{Issue, Notification, Repository};
+use wx_utils::menu_label;
 use wxdragon::prelude::*;
+
+use super::keymap::Command;
+use crate::config::Shortcuts;
 
 const ID_NOTHING: i32 = ID_HIGHEST + 99;
 const ID_FIRST: i32 = ID_HIGHEST + 100;
@@ -36,7 +40,7 @@ impl Selected {
 	}
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
 	Open,
 	Comment,
@@ -86,22 +90,22 @@ impl Action {
 
 	const fn label(self) -> &'static str {
 		match self {
-			Self::Open => "&Open\tEnter",
-			Self::Comment => "&Comment...\tCtrl+R",
+			Self::Open => "&Open",
+			Self::Comment => "&Comment...",
 			Self::CloseCompleted => "&Completed",
 			Self::CloseNotPlanned => "&Not planned",
 			Self::CloseDuplicate => "&Duplicate of...",
 			Self::ClosePullRequest => "Clo&se",
 			Self::Reopen => "R&eopen",
 			Self::MarkRead => "Mark as &read",
-			Self::MarkDone => "Mark as &done\tDelete",
+			Self::MarkDone => "Mark as &done",
 			Self::Unsubscribe => "&Unsubscribe",
 			Self::Star => "S&tar",
 			Self::Unstar => "Uns&tar",
 			Self::Watch => "&Watch",
 			Self::Unwatch => "Un&watch",
-			Self::CopyLink => "Copy &link\tCtrl+Shift+C",
-			Self::OpenInBrowser => "Open in &browser\tCtrl+B",
+			Self::CopyLink => "Copy &link",
+			Self::OpenInBrowser => "Open in &browser",
 		}
 	}
 
@@ -175,8 +179,9 @@ fn entries(selected: &Selected, marks: Marks) -> Vec<Entry> {
 	entries
 }
 
-/// A menu of what `selected` offers, or a single disabled line when nothing is selected.
-pub fn menu(selected: Option<&Selected>, marks: Marks) -> Menu {
+/// A menu of what `selected` offers, with the keys `shortcuts` binds, or a single disabled line
+/// when nothing is selected.
+pub fn menu(selected: Option<&Selected>, marks: Marks, shortcuts: &Shortcuts) -> Menu {
 	let menu = Menu::builder().build();
 	let Some(selected) = selected else {
 		menu.append(ID_NOTHING, "No item selected", "", ItemKind::Normal);
@@ -185,11 +190,11 @@ pub fn menu(selected: Option<&Selected>, marks: Marks) -> Menu {
 	};
 	for entry in entries(selected, marks) {
 		match entry {
-			Entry::Action(action) => append(&menu, action),
+			Entry::Action(action) => append(&menu, action, shortcuts),
 			Entry::Submenu(label, actions) => {
 				let submenu = Menu::builder().build();
 				for action in actions {
-					append(&submenu, action);
+					append(&submenu, action, shortcuts);
 				}
 				menu.append_submenu(submenu, label, "");
 			}
@@ -199,6 +204,7 @@ pub fn menu(selected: Option<&Selected>, marks: Marks) -> Menu {
 	menu
 }
 
-fn append(menu: &Menu, action: Action) {
-	menu.append(action.id(), action.label(), action.help(), ItemKind::Normal);
+fn append(menu: &Menu, action: Action, shortcuts: &Shortcuts) {
+	let label = menu_label(action.label(), &Command::Item(action).accelerator(shortcuts));
+	menu.append(action.id(), &label, action.help(), ItemKind::Normal);
 }
