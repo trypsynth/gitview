@@ -1,6 +1,24 @@
 use chrono::{DateTime, Local};
+use gitview_core::models::Repository;
 
 use super::web;
+
+/// A repository as a list shows it: its name, what it's for when it says, and whether it's
+/// private or a fork.
+pub fn repository_label(repository: &Repository) -> String {
+	let mut label = repository.full_name.clone();
+	if let Some(description) = repository.description.as_deref().filter(|text| !text.is_empty()) {
+		label.push_str(": ");
+		label.push_str(description);
+	}
+	if repository.private {
+		label.push_str(", private");
+	}
+	if repository.fork {
+		label.push_str(", fork");
+	}
+	label
+}
 
 /// "1 comment", not "1 comments".
 pub fn comment_count(comments: u64) -> String {

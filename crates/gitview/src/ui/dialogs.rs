@@ -6,6 +6,7 @@ mod settings;
 mod shortcuts;
 mod sign_in;
 mod thread;
+mod user;
 
 pub use comment::post_comment;
 pub use page::open_subject;
@@ -15,6 +16,7 @@ pub use settings::{Settings, show_settings_dialog};
 pub use shortcuts::show_shortcuts_dialog;
 pub use sign_in::show_sign_in_dialog;
 pub use thread::open_issue;
+pub use user::open_user;
 use wxdragon::prelude::*;
 
 /// Runs `open` when Enter is pressed in `list`, so its items open without an Open button taking a

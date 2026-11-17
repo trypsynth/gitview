@@ -1,3 +1,5 @@
+use std::{thread, time::Duration};
+
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use ureq::RequestBuilder;
 
@@ -5,7 +7,7 @@ use crate::{
 	Error,
 	models::{
 		CloseReason, Comment, Commit, CommitDetails, Email, Issue, IssueState, Notification, Profile, ProfileUpdate,
-		Repository, SocialAccount, SubjectDetails, User,
+		Repository, SocialAccount, SubjectDetails, User, UserProfile,
 	},
 	page::{Cursor, Kind, Page, link},
 };
@@ -16,8 +18,11 @@ const API_VERSION: &str = "2022-11-28";
 // mentions and task lists already in place.
 const HTML_ACCEPT: &str = "application/vnd.github.full+json";
 const USER_AGENT: &str = concat!("gitview/", env!("CARGO_PKG_VERSION"));
-/// How many watched repositories a page holds, the most GitHub allows.
-const WATCHED_PAGE_SIZE: usize = 100;
+/// How many items a page of a list read [newest first](Client::newest_first) holds, the most
+/// GitHub allows.
+const PAGE_SIZE: usize = 100;
+/// How long to wait before asking again after GitHub has a server error.
+const SERVER_ERROR_WAIT: Duration = Duration::from_secs(1);
 
 #[derive(Serialize)]
 struct NewComment<'a> {
@@ -178,23 +183,33 @@ impl Client {
 
 	/// Repositories the signed-in user watches, which GitHub calls subscriptions, most recently
 	/// watched first.
-	///
-	/// GitHub lists them oldest first and can't be asked otherwise, so the list is read from its
-	/// last page back, each page back to front. The first page says where the last one is.
 	pub fn watched(&self) -> Result<Page<Repository>, Error> {
-		let (mut first, last) =
-			self.fetch_page_links(&format!("/user/subscriptions?per_page={WATCHED_PAGE_SIZE}"), Kind::Plain, false)?;
-		if let Some(last) = last {
-			let mut page = self.fetch_cursor(&Cursor::new(last, Kind::Plain, true))?;
-			// The last page can hold only a few, which would open the view nearly empty.
-			if page.items.len() < WATCHED_PAGE_SIZE / 2 {
-				self.load_pages(&mut page, 1)?;
-			}
-			return Ok(page);
-		}
-		// One page holds them all.
-		first.items.reverse();
-		Ok(first)
+		self.newest_first(&format!("/user/subscriptions?per_page={PAGE_SIZE}"))
+	}
+
+	/// Anyone's public profile, by their login.
+	pub fn user(&self, login: &str) -> Result<UserProfile, Error> {
+		self.get(&format!("/users/{login}"))
+	}
+
+	/// `login`'s public repositories, most recently updated first.
+	pub fn user_repositories(&self, login: &str) -> Result<Page<Repository>, Error> {
+		self.fetch_page(&format!("/users/{login}/repos?sort=updated&direction=desc&per_page=100"), Kind::Plain)
+	}
+
+	/// What `login` has starred, most recently starred first.
+	pub fn user_starred(&self, login: &str) -> Result<Page<Repository>, Error> {
+		self.fetch_page(&format!("/users/{login}/starred?sort=created&direction=desc&per_page=100"), Kind::Plain)
+	}
+
+	/// Who follows `login`, most recent first.
+	pub fn followers(&self, login: &str) -> Result<Page<User>, Error> {
+		self.newest_first(&format!("/users/{login}/followers?per_page={PAGE_SIZE}"))
+	}
+
+	/// Who `login` follows, most recent first.
+	pub fn following(&self, login: &str) -> Result<Page<User>, Error> {
+		self.newest_first(&format!("/users/{login}/following?per_page={PAGE_SIZE}"))
 	}
 
 	/// The newest commits on the default branch of `repo` (`owner/name`). A repository with no
@@ -310,6 +325,32 @@ impl Client {
 		)
 	}
 
+	/// A list at `path`, which GitHub can only give oldest first, newest first: it is read from its
+	/// last page back, each page back to front. The first page says where the last one is.
+	fn newest_first<T: DeserializeOwned>(&self, path: &str) -> Result<Page<T>, Error> {
+		let (mut first, last) = self.fetch_page_links(path, Kind::Plain, false)?;
+		if let Some(last) = last {
+			let mut page = match self.fetch_cursor(&Cursor::new(last, Kind::Plain, true)) {
+				Ok(page) => page,
+				// A list so long GitHub can't reach its end in time, such as a famous account's
+				// followers, is read from its start instead: oldest first, but there to read.
+				Err(Error::Http(ureq::Error::StatusCode(500..=599))) => {
+					tracing::warn!(path, "couldn't reach the newest end of the list, so reading it oldest first");
+					return Ok(first);
+				}
+				Err(error) => return Err(error),
+			};
+			// The last page can hold only a few, which would open the list nearly empty.
+			if page.items.len() < PAGE_SIZE / 2 {
+				self.load_pages(&mut page, 1)?;
+			}
+			return Ok(page);
+		}
+		// One page holds them all.
+		first.items.reverse();
+		Ok(first)
+	}
+
 	/// The first page of a list at `path`, read front to back.
 	fn fetch_page<T: DeserializeOwned>(&self, path: &str, kind: Kind) -> Result<Page<T>, Error> {
 		Ok(self.fetch_page_links(path, kind, false)?.0)
@@ -331,8 +372,17 @@ impl Client {
 		// The path alone: the token travels in a header, never in it.
 		tracing::debug!(path, "fetching");
 		let accept = if kind == Kind::Rendered { HTML_ACCEPT } else { "application/vnd.github+json" };
-		let mut response =
-			self.authorize(self.agent.get(format!("{API_URL}{path}"))).header("Accept", accept).call()?;
+		let request = || self.authorize(self.agent.get(format!("{API_URL}{path}"))).header("Accept", accept).call();
+		let mut response = match request() {
+			// GitHub can time out on a page deep in a very long list, and asks clients to try
+			// again after a server error.
+			Err(ureq::Error::StatusCode(500..=599)) => {
+				tracing::debug!(path, "server error, trying once more");
+				thread::sleep(SERVER_ERROR_WAIT);
+				request()?
+			}
+			result => result?,
+		};
 		let links = response.headers().get("Link").and_then(|header| header.to_str().ok()).unwrap_or_default();
 		// A link anywhere but the API is never followed, so the token never goes anywhere else.
 		let path_of = |rel| link(links, rel).and_then(|url| url.strip_prefix(API_URL)).map(str::to_owned);

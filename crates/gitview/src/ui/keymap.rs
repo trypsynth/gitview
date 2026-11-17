@@ -13,6 +13,7 @@ pub enum Command {
 	/// since only one of each pair is ever offered.
 	Item(Action),
 	GoToRepository,
+	GoToUser,
 	/// Moves the view on screen up the Views list, or down it.
 	MoveViewUp,
 	MoveViewDown,
@@ -25,7 +26,7 @@ pub enum Command {
 
 impl Command {
 	/// Every command, in the order Customize Keyboard Shortcuts lists them.
-	pub const ALL: [Self; 22] = [
+	pub const ALL: [Self; 23] = [
 		Self::Item(Action::Open),
 		Self::Item(Action::Comment),
 		Self::Item(Action::CloseCompleted),
@@ -41,6 +42,7 @@ impl Command {
 		Self::Item(Action::CopyLink),
 		Self::Item(Action::OpenInBrowser),
 		Self::GoToRepository,
+		Self::GoToUser,
 		Self::MoveViewUp,
 		Self::MoveViewDown,
 		Self::Refresh,
@@ -70,6 +72,7 @@ impl Command {
 				Action::OpenInBrowser => "open_in_browser",
 			},
 			Self::GoToRepository => "go_to_repository",
+			Self::GoToUser => "go_to_user",
 			Self::MoveViewUp => "move_view_up",
 			Self::MoveViewDown => "move_view_down",
 			Self::Refresh => "refresh",
@@ -100,6 +103,7 @@ impl Command {
 				Action::OpenInBrowser => "Open in browser",
 			},
 			Self::GoToRepository => "Go to repository",
+			Self::GoToUser => "Go to user",
 			Self::MoveViewUp => "Move view up",
 			Self::MoveViewDown => "Move view down",
 			Self::Refresh => "Refresh",
@@ -119,6 +123,7 @@ impl Command {
 			Self::Item(Action::CopyLink) => (true, true, "C"),
 			Self::Item(Action::OpenInBrowser) => (true, false, "B"),
 			Self::GoToRepository => (true, false, "G"),
+			Self::GoToUser => (true, false, "U"),
 			Self::MoveViewUp => (false, true, "Up"),
 			Self::MoveViewDown => (false, true, "Down"),
 			Self::Refresh => (false, false, "F5"),
@@ -157,6 +162,7 @@ mod tests {
 		assert_eq!(key(Command::Item(Action::CopyLink)), "Ctrl+Shift+C");
 		assert_eq!(key(Command::Item(Action::OpenInBrowser)), "Ctrl+B");
 		assert_eq!(key(Command::GoToRepository), "Ctrl+G");
+		assert_eq!(key(Command::GoToUser), "Ctrl+U");
 		assert_eq!(key(Command::MoveViewUp), "Shift+Up");
 		assert_eq!(key(Command::MoveViewDown), "Shift+Down");
 		assert_eq!(key(Command::Refresh), "F5");

@@ -6,6 +6,33 @@ pub struct User {
 	pub name: Option<String>,
 }
 
+/// Anyone's public profile, as their page on GitHub shows it.
+#[derive(Debug, Clone, Deserialize)]
+pub struct UserProfile {
+	pub login: String,
+	pub name: Option<String>,
+	/// `User` or `Organization`.
+	#[serde(rename = "type")]
+	pub kind: String,
+	pub bio: Option<String>,
+	pub company: Option<String>,
+	pub location: Option<String>,
+	/// The website link; GitHub calls it the blog. It may leave out `https://`.
+	pub blog: Option<String>,
+	pub html_url: String,
+	pub followers: u64,
+	pub following: u64,
+	pub public_repos: u64,
+	pub created_at: String,
+}
+
+impl UserProfile {
+	#[must_use]
+	pub fn is_organization(&self) -> bool {
+		self.kind == "Organization"
+	}
+}
+
 /// The signed-in user's public profile, as the profile settings page shows it.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Profile {

@@ -33,7 +33,7 @@ use super::{
 	keymap::Command,
 	live,
 	sectioned::SectionedLists,
-	text::comment_count,
+	text::{comment_count, repository_label},
 	view::{self, View},
 	visibility::Visibility,
 };
@@ -45,6 +45,7 @@ const ID_PROFILE: i32 = ID_HIGHEST + 4;
 const ID_SETTINGS: i32 = ID_HIGHEST + 5;
 const ID_SHORTCUTS: i32 = ID_HIGHEST + 6;
 const ID_GO_TO_REPOSITORY: i32 = ID_HIGHEST + 7;
+const ID_GO_TO_USER: i32 = ID_HIGHEST + 8;
 const ID_FILTER_FIRST: i32 = ID_HIGHEST + 10;
 const ACTIONS_MENU: usize = 1;
 const FILTER_MENU: usize = 2;
@@ -349,6 +350,7 @@ impl MainWindow {
 		self.frame.on_menu_selected(move |event| match event.get_id() {
 			ID_REFRESH => window.fetch_all(),
 			ID_GO_TO_REPOSITORY => window.go_to_repository(),
+			ID_GO_TO_USER => window.go_to_user(),
 			ID_PROFILE => window.edit_profile(),
 			ID_SETTINGS => window.open_settings(),
 			ID_SHORTCUTS => window.edit_shortcuts(),
@@ -1173,6 +1175,21 @@ impl MainWindow {
 		});
 	}
 
+	/// Asks for a username, or a link to their profile, and opens that user.
+	fn go_to_user(&self) {
+		let Some(client) = self.state.borrow().client.clone() else {
+			return;
+		};
+		let Some(answer) = prompt_text(&self.frame, "Username:", "Go to User") else {
+			return;
+		};
+		let Some(login) = parse_user_reference(&answer) else {
+			show_error(&self.frame, format!("\"{}\" isn't a GitHub username.", answer.trim()), "Go to User");
+			return;
+		};
+		dialogs::open_user(self.frame, client, login);
+	}
+
 	fn close_as_duplicate(&self, client: Arc<Client>, selected: &Selected) {
 		let Some((repo, number)) = selected.issue() else {
 			return;
@@ -1297,9 +1314,10 @@ fn shown(arrangement: &[(View, bool)]) -> Vec<View> {
 }
 
 /// The File menu's items that a key can be bound to, in order: id, command, text and help.
-const FILE_ITEMS: [(i32, Command, &str, &str); 6] = [
+const FILE_ITEMS: [(i32, Command, &str, &str); 7] = [
 	(ID_REFRESH, Command::Refresh, "&Refresh", "Reload the selected view"),
 	(ID_GO_TO_REPOSITORY, Command::GoToRepository, "&Go to Repository...", "Open a repository by its name"),
+	(ID_GO_TO_USER, Command::GoToUser, "Go to &User...", "Open a user by their username"),
 	(ID_SETTINGS, Command::Settings, "&Settings...", "Choose which views to show"),
 	(ID_SHORTCUTS, Command::CustomizeShortcuts, "Customize &Keyboard Shortcuts...", "Change Gitview's keys"),
 	(ID_PROFILE, Command::EditProfile, "Edit &Profile...", "Change your public GitHub profile"),
@@ -1312,8 +1330,8 @@ fn build_menu_bar(frame: &Frame, shortcuts: &config::Shortcuts) {
 	let file_menu = Menu::builder().build();
 	for (index, (id, command, label, help)) in FILE_ITEMS.into_iter().enumerate() {
 		file_menu.append(id, &menu_label(label, &command.accelerator(shortcuts)), help, ItemKind::Normal);
-		// Refresh and Go to Repository stand apart from the rest, which are about Gitview itself.
-		if index == 1 {
+		// Refresh and the Go to items stand apart from the rest, which are about Gitview itself.
+		if index == 2 {
 			file_menu.append_separator();
 		}
 	}
@@ -1340,6 +1358,22 @@ fn parse_repository_reference(text: &str) -> Option<String> {
 	let name = name.strip_suffix(".git").unwrap_or(name);
 	let valid = |part: &str| !part.is_empty() && !part.chars().any(char::is_whitespace);
 	(valid(owner) && valid(name)).then(|| format!("{owner}/{name}"))
+}
+
+/// Reads a username from what was typed: the login itself, an `@mention`, or a link to their
+/// profile. GitHub logins are letters, digits and single hyphens.
+fn parse_user_reference(text: &str) -> Option<String> {
+	let text = text.trim();
+	let path = ["https://github.com/", "http://github.com/", "github.com/"]
+		.iter()
+		.find_map(|prefix| text.strip_prefix(prefix))
+		.unwrap_or(text);
+	let login = path.split('/').find(|part| !part.is_empty())?.trim_start_matches('@');
+	let valid = !login.is_empty()
+		&& login.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '-')
+		&& !login.starts_with('-')
+		&& !login.ends_with('-');
+	valid.then(|| login.to_owned())
 }
 
 /// Reads an issue reference: `12` or `#12` in `repo`, `owner/name#12`, or a link to it.
@@ -1385,21 +1419,6 @@ fn kind_name(selected: &Selected) -> String {
 	}
 }
 
-fn repository_label(repository: &Repository) -> String {
-	let mut label = repository.full_name.clone();
-	if let Some(description) = repository.description.as_deref().filter(|text| !text.is_empty()) {
-		label.push_str(": ");
-		label.push_str(description);
-	}
-	if repository.private {
-		label.push_str(", private");
-	}
-	if repository.fork {
-		label.push_str(", fork");
-	}
-	label
-}
-
 fn issue_label(issue: &Issue) -> String {
 	let kind = if issue.is_pull_request() { "pull request" } else { "issue" };
 	format!(
@@ -1414,7 +1433,7 @@ fn issue_label(issue: &Issue) -> String {
 
 #[cfg(test)]
 mod tests {
-	use super::{View, moved_message, parse_issue_reference, parse_repository_reference};
+	use super::{View, moved_message, parse_issue_reference, parse_repository_reference, parse_user_reference};
 
 	#[test]
 	fn a_moved_view_is_placed_by_its_neighbours() {
@@ -1422,6 +1441,18 @@ mod tests {
 		assert_eq!(moved_message(&order, View::Starred), "Moved before Notifications.");
 		assert_eq!(moved_message(&order, View::Notifications), "Moved between Starred and Repositories.");
 		assert_eq!(moved_message(&order, View::Repositories), "Moved after Notifications.");
+	}
+
+	#[test]
+	fn a_user_is_found_by_their_login_a_mention_or_a_link() {
+		let quin = Some("trypsynth".to_owned());
+		assert_eq!(parse_user_reference(" trypsynth "), quin);
+		assert_eq!(parse_user_reference("@trypsynth"), quin);
+		assert_eq!(parse_user_reference("https://github.com/trypsynth"), quin);
+		assert_eq!(parse_user_reference("github.com/trypsynth/gitview"), quin);
+		assert_eq!(parse_user_reference("try synth"), None);
+		assert_eq!(parse_user_reference("-trypsynth"), None);
+		assert_eq!(parse_user_reference(""), None);
 	}
 
 	#[test]
