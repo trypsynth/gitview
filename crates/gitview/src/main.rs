@@ -3,6 +3,7 @@
 use logkeeper::Logkeeper;
 
 mod config;
+mod template;
 mod token;
 mod ui;
 

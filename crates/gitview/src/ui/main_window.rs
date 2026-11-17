@@ -33,11 +33,11 @@ use super::{
 	keymap::Command,
 	live,
 	sectioned::SectionedLists,
-	text::{comment_count, repository_label},
+	text::{self, repository_label},
 	view::{self, View},
 	visibility::Visibility,
 };
-use crate::{config, token, ui::notice};
+use crate::{config, template, token, ui::notice};
 
 const ID_REFRESH: i32 = ID_HIGHEST + 2;
 const ID_SIGN_OUT: i32 = ID_HIGHEST + 3;
@@ -273,6 +273,7 @@ impl MainWindow {
 	pub fn open(door: Option<doorbell::Door>) {
 		let frame = Frame::builder().with_title("Gitview").with_size(WINDOW_SIZE).build();
 		let config = config::load();
+		template::use_templates(config.templates.clone());
 		build_menu_bar(&frame, &config.shortcuts);
 		let panel = Panel::builder(&frame).build();
 		let settings = config.views;
@@ -577,9 +578,10 @@ impl MainWindow {
 		let current = dialogs::Settings {
 			views: self.state.borrow().arrangement.clone(),
 			lists: self.state.borrow().lists,
+			templates: config.templates.clone(),
 			log_level: config.log_level(),
 		};
-		let Some(dialogs::Settings { views: arrangement, lists, log_level }) =
+		let Some(dialogs::Settings { views: arrangement, lists, templates, log_level }) =
 			dialogs::show_settings_dialog(&self.frame, &current, &config::folder())
 		else {
 			return;
@@ -591,6 +593,7 @@ impl MainWindow {
 		}
 		config.views = views_setting(&arrangement);
 		config.lists = lists;
+		config.templates = templates.clone();
 		if arrangement != current.views {
 			tracing::info!(order = ?config.views.order, hidden = ?config.views.hidden, "views changed");
 		}
@@ -609,6 +612,17 @@ impl MainWindow {
 			// Each list turns round where it stands, keeping the item it was on.
 			for (view, list) in self.sections.lists() {
 				list.set_start_at_end(lists.oldest_first);
+				self.fill(view);
+			}
+		}
+		if templates != current.templates {
+			tracing::info!("templates changed");
+			template::use_templates(templates);
+			// Each view loaded so far is labelled again, keeping the item it was on.
+			for (view, _) in self.sections.lists() {
+				if let Some(loaded) = self.state.borrow_mut().loaded[view.index()].as_mut() {
+					loaded.labels = loaded.items.labels();
+				}
 				self.fill(view);
 			}
 		}
@@ -1411,13 +1425,14 @@ fn parse_issue_reference(text: &str, repo: &str) -> Option<(String, u64)> {
 }
 
 fn notification_label(notification: &Notification) -> String {
-	format!(
-		"{}: {}. {}, {}",
-		notification.repository.full_name,
-		notification.subject.title.trim_end_matches('.'),
-		kind_label(&notification.subject.kind),
-		notification.reason.replace('_', " "),
-	)
+	let context = minijinja::context! {
+		repository => &notification.repository.full_name,
+		title => notification.subject.title.trim_end_matches('.'),
+		kind => kind_label(&notification.subject.kind),
+		reason => notification.reason.replace('_', " "),
+		unread => notification.unread,
+	};
+	template::render(template::Kind::Notification, &context)
 }
 
 fn kind_label(kind: &str) -> &str {
@@ -1440,15 +1455,7 @@ fn kind_name(selected: &Selected) -> String {
 }
 
 fn issue_label(issue: &Issue) -> String {
-	let kind = if issue.is_pull_request() { "pull request" } else { "issue" };
-	format!(
-		"{}: #{} {}, {kind} by {}, {}",
-		issue.repository().unwrap_or("unknown"),
-		issue.number,
-		issue.title,
-		issue.user.login,
-		comment_count(issue.comments),
-	)
+	text::issue_label(issue, false)
 }
 
 #[cfg(test)]

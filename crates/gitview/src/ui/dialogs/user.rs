@@ -24,7 +24,7 @@ use crate::{
 		feed::{self, Feed, FeedSection, RowActions, Rows, Shared},
 		live, notice,
 		sectioned::SectionedLists,
-		text::{local_time, repository_label},
+		text::{local_time, person_label, repository_label},
 	},
 };
 
@@ -213,11 +213,7 @@ impl Feeds {
 		let only = |section| move |shown| shown == section;
 		let repository_row =
 			|_, repository: &Repository| Some((repository.full_name.clone(), repository_label(repository)));
-		let user_row = |_, user: &User| {
-			let label =
-				if user.is_organization() { format!("{}, organization", user.login) } else { user.login.clone() };
-			Some((user.login.clone(), label))
-		};
+		let user_row = |_, user: &User| Some((user.login.clone(), person_label(user)));
 		Self {
 			repositories: Feed::new(sections, lists, only(Section::Repositories), repository_row),
 			starred: Feed::new(sections, lists, only(Section::Starred), repository_row),

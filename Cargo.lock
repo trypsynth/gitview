@@ -1120,6 +1120,7 @@ dependencies = [
  "keyring",
  "live-region",
  "logkeeper",
+ "minijinja",
  "quiet-list",
  "serde",
  "shipfitter",
@@ -1690,6 +1691,12 @@ checksum = "488016bfae457b036d996092f6cb448677611ce4449e970ceaf42695203f218a"
 dependencies = [
  "autocfg",
 ]
+
+[[package]]
+name = "minijinja"
+version = "3.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "509eeb2603a84eccabb4d75f6ec8ba23b46bbf441aaeb863d6b83a5887fd51e4"
 
 [[package]]
 name = "minimal-lexical"

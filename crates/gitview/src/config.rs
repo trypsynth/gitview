@@ -7,6 +7,8 @@ use homeport::Homeport;
 use logkeeper::Level;
 use serde::{Deserialize, Serialize};
 
+use crate::template::Templates;
+
 const FILE_NAME: &str = "gitview.toml";
 /// When set, names the folder settings go in, whatever the install, such as to try a second
 /// copy with settings of its own.
@@ -22,6 +24,8 @@ pub struct Config {
 	/// How much goes in the log, by logkeeper's names for its levels, such as `debug`.
 	pub log_level: Option<String>,
 	pub lists: Lists,
+	/// The row templates the user has changed.
+	pub templates: Templates,
 }
 
 /// Which way lists run, as Fedra's Display options have it. A thread always reads oldest first,

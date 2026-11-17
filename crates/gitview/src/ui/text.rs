@@ -1,23 +1,67 @@
 use chrono::{DateTime, Local};
-use gitview_core::models::Repository;
+use gitview_core::models::{Commit, Issue, Repository, User};
+use minijinja::context;
 
 use super::web;
+use crate::template::{self, Kind};
 
-/// A repository as a list shows it: its name, what it's for when it says, and whether it's
-/// private or a fork.
+/// A repository as its template shows it.
 pub fn repository_label(repository: &Repository) -> String {
-	let mut label = repository.full_name.clone();
-	if let Some(description) = repository.description.as_deref().filter(|text| !text.is_empty()) {
-		label.push_str(": ");
-		label.push_str(description);
-	}
-	if repository.private {
-		label.push_str(", private");
-	}
-	if repository.fork {
-		label.push_str(", fork");
-	}
-	label
+	let context = context! {
+		name => &repository.full_name,
+		description => repository.description.as_deref().unwrap_or_default(),
+		private => repository.private,
+		fork => repository.fork,
+		stars => repository.stargazers_count,
+		open_issues => repository.open_issues_count,
+	};
+	template::render(Kind::Repository, &context)
+}
+
+/// An issue or pull request as its template shows it. In a repository's own dialog, where every
+/// row shares the repository, it goes unsaid.
+pub fn issue_label(issue: &Issue, in_repository: bool) -> String {
+	let ending = if issue.is_open() {
+		String::new()
+	} else if issue.is_pull_request() {
+		if issue.is_merged() { "merged".to_owned() } else { "closed".to_owned() }
+	} else {
+		issue.state_reason.as_deref().unwrap_or("closed").replace('_', " ")
+	};
+	let context = context! {
+		repository => if in_repository { "" } else { issue.repository().unwrap_or("unknown") },
+		number => issue.number,
+		title => &issue.title,
+		kind => if issue.is_pull_request() { "pull request" } else { "issue" },
+		author => &issue.user.login,
+		comments => comment_count(issue.comments),
+		state => &issue.state,
+		ending,
+		time => local_time(&issue.created_at),
+	};
+	template::render(Kind::Issue, &context)
+}
+
+/// A commit as its template shows it.
+pub fn commit_label(commit: &Commit) -> String {
+	let context = context! {
+		summary => commit.summary(),
+		author => commit.author_name(),
+		author_name => &commit.commit.author.name,
+		time => local_time(&commit.commit.author.date),
+		sha => commit.short_sha(),
+	};
+	template::render(Kind::Commit, &context)
+}
+
+/// A person, or an organization, as its template shows it.
+pub fn person_label(user: &User) -> String {
+	let context = context! {
+		login => &user.login,
+		name => user.name.as_deref().unwrap_or_default(),
+		organization => user.is_organization(),
+	};
+	template::render(Kind::Person, &context)
 }
 
 /// "1 comment", not "1 comments".

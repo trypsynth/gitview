@@ -20,7 +20,7 @@ use crate::{
 		feed::{self, Feed, FeedSection, RowActions},
 		live, notice,
 		sectioned::SectionedLists,
-		text::{comment_count, count, local_time},
+		text::{self, commit_label, count, local_time},
 		web,
 	},
 };
@@ -216,30 +216,9 @@ fn open_commit(dialog: Dialog, client: Arc<Client>, repo: String, sha: String) {
 	});
 }
 
-/// An issue or pull request as its section lists it. A closed one says how it ended.
+/// An issue or pull request as its section lists it, without the repository every row shares.
 fn issue_label(issue: &Issue) -> String {
-	let mut label =
-		format!("#{} {}, by {}, {}", issue.number, issue.title, issue.user.login, comment_count(issue.comments));
-	if !issue.is_open() {
-		let ending = if issue.is_pull_request() {
-			if issue.is_merged() { "merged".to_owned() } else { "closed".to_owned() }
-		} else {
-			issue.state_reason.as_deref().unwrap_or("closed").replace('_', " ")
-		};
-		label.push_str(", ");
-		label.push_str(&ending);
-	}
-	label
-}
-
-fn commit_label(commit: &Commit) -> String {
-	format!(
-		"{}, by {}, {}, {}",
-		commit.summary(),
-		commit.author_name(),
-		local_time(&commit.commit.author.date),
-		commit.short_sha()
-	)
+	text::issue_label(issue, true)
 }
 
 /// The page under a commit's heading: the rest of its message, then what it changed, file by

@@ -1,4 +1,8 @@
-use std::path::Path;
+use std::{
+	cell::{Cell, RefCell},
+	path::Path,
+	rc::Rc,
+};
 
 use logkeeper::Level;
 use wx_utils::{add_ok_cancel_footer, build_ok_cancel_buttons, dialog_padding, show_error};
@@ -6,9 +10,16 @@ use wx_utils::{add_ok_cancel_footer, build_ok_cancel_buttons, dialog_padding, sh
 use wxdragon::accessible::AccRole;
 use wxdragon::prelude::*;
 
-use crate::{config::Lists, ui::view::View};
+use crate::{
+	config::Lists,
+	template::{self, Kind, Templates},
+	ui::view::View,
+};
 
 const LIST_SIZE: Size = Size { width: 260, height: 180 };
+const TEMPLATE_SIZE: Size = Size { width: 420, height: 120 };
+/// Where the Templates page is among the pages.
+const TEMPLATES_PAGE: usize = 2;
 /// The log levels, quietest first, with what the Log level choice calls them.
 const LOG_LEVELS: [(Level, &str); 6] = [
 	(Level::Off, "Off"),
@@ -25,6 +36,7 @@ pub struct Settings {
 	/// Every view in order, with whether each is shown.
 	pub views: Vec<(View, bool)>,
 	pub lists: Lists,
+	pub templates: Templates,
 	pub log_level: Level,
 }
 
@@ -49,6 +61,7 @@ pub fn show_settings_dialog(parent: &dyn WxWidget, settings: &Settings, log_fold
 	views_page.set_sizer(page, true);
 	notebook.add_page(&views_page, "Views", true, None);
 	let oldest_first = display_page(notebook, padding, settings.lists);
+	let templates = TemplatesPage::new(notebook, padding, &settings.templates);
 	let log_level = advanced_page(notebook, padding, settings.log_level, log_folder);
 	let content = BoxSizer::builder(Orientation::Vertical).build();
 	content.add(&notebook, 1, SizerFlag::Expand | SizerFlag::All, padding);
@@ -62,16 +75,27 @@ pub fn show_settings_dialog(parent: &dyn WxWidget, settings: &Settings, log_fold
 			break None;
 		}
 		read_checks(list, &mut views);
-		if views.iter().any(|(_, shown)| *shown) {
-			let level = log_level.get_selection().and_then(|index| LOG_LEVELS.get(index as usize));
-			break Some(Settings {
-				views: views.clone(),
-				lists: Lists { oldest_first: oldest_first.get_value() },
-				log_level: level.map_or(settings.log_level, |(level, _)| *level),
-			});
+		if !views.iter().any(|(_, shown)| *shown) {
+			show_error(&dialog, "Choose at least one view to show.", "Settings");
+			list.set_focus();
+			continue;
 		}
-		show_error(&dialog, "Choose at least one view to show.", "Settings");
-		list.set_focus();
+		let edited = match templates.read() {
+			Ok(edited) => edited,
+			Err(mistake) => {
+				notebook.set_selection(TEMPLATES_PAGE);
+				show_error(&dialog, mistake, "Settings");
+				templates.text.set_focus();
+				continue;
+			}
+		};
+		let level = log_level.get_selection().and_then(|index| LOG_LEVELS.get(index as usize));
+		break Some(Settings {
+			views: views.clone(),
+			lists: Lists { oldest_first: oldest_first.get_value() },
+			templates: edited,
+			log_level: level.map_or(settings.log_level, |(level, _)| *level),
+		});
 	};
 	dialog.destroy();
 	result
@@ -89,6 +113,83 @@ fn display_page(notebook: Notebook, padding: i32, lists: Lists) -> CheckBox {
 	page.set_sizer(content, true);
 	notebook.add_page(&page, "Display", false, None);
 	oldest_first
+}
+
+/// The page for the templates rows are shown with: which kind of row, its template, and a way
+/// back to the default. The README says what each template can use.
+struct TemplatesPage {
+	kinds: Choice,
+	text: TextCtrl,
+	/// Each kind's template as edited so far, in the order of [`Kind::ALL`].
+	edited: Rc<RefCell<Vec<String>>>,
+	/// Which kind the text shows.
+	current: Rc<Cell<usize>>,
+}
+
+impl TemplatesPage {
+	fn new(notebook: Notebook, padding: i32, templates: &Templates) -> Self {
+		let page = Panel::builder(&notebook).build();
+		#[cfg(target_os = "windows")]
+		page.set_accessibility_role(AccRole::PropertyPage);
+		let kinds_label = StaticText::builder(&page).with_label("&Template for:").build();
+		let kinds =
+			Choice::builder(&page).with_choices(Kind::ALL.iter().map(|kind| kind.title().to_owned()).collect()).build();
+		kinds.set_selection(0);
+		let edited: Vec<String> = Kind::ALL.iter().map(|kind| templates.get(*kind).to_owned()).collect();
+		let text_label = StaticText::builder(&page).with_label("T&emplate:").build();
+		let text = TextCtrl::builder(&page)
+			.with_style(TextCtrlStyle::MultiLine)
+			.with_size(TEMPLATE_SIZE)
+			.with_value(&edited[0])
+			.build();
+		let reset = Button::builder(&page).with_label("&Reset to default").build();
+		let row = BoxSizer::builder(Orientation::Horizontal).build();
+		row.add(&kinds_label, 0, SizerFlag::AlignCenterVertical | SizerFlag::Right, padding);
+		row.add(&kinds, 1, SizerFlag::Expand, 0);
+		let content = BoxSizer::builder(Orientation::Vertical).build();
+		content.add_sizer(&row, 0, SizerFlag::Expand | SizerFlag::All, padding);
+		content.add(&text_label, 0, SizerFlag::Left | SizerFlag::Right, padding);
+		content.add(&text, 1, SizerFlag::Expand | SizerFlag::All, padding);
+		content.add(&reset, 0, SizerFlag::Left | SizerFlag::Right | SizerFlag::Bottom, padding);
+		page.set_sizer(content, true);
+		notebook.add_page(&page, "Templates", false, None);
+		let templates_page =
+			Self { kinds, text, edited: Rc::new(RefCell::new(edited)), current: Rc::new(Cell::new(0)) };
+		let (edited, current) = (Rc::clone(&templates_page.edited), Rc::clone(&templates_page.current));
+		kinds.on_selection_changed(move |_| {
+			let Some(index) = kinds.get_selection().map(|index| index as usize) else {
+				return;
+			};
+			let mut edited = edited.borrow_mut();
+			edited[current.get()] = text.get_value();
+			current.set(index);
+			text.set_value(&edited[index]);
+		});
+		let current = Rc::clone(&templates_page.current);
+		reset.on_click(move |_| {
+			text.set_value(Kind::ALL[current.get()].default_template());
+			text.set_focus();
+		});
+		templates_page
+	}
+
+	/// The templates as edited, or what's wrong with the first that can't be read, which the page
+	/// is turned to.
+	fn read(&self) -> Result<Templates, String> {
+		let mut edited = self.edited.borrow_mut();
+		edited[self.current.get()] = self.text.get_value();
+		let mut templates = Templates::default();
+		for (index, (kind, text)) in Kind::ALL.iter().zip(edited.iter()).enumerate() {
+			if let Some(mistake) = template::mistake(text) {
+				self.current.set(index);
+				self.kinds.set_selection(u32::try_from(index).unwrap_or_default());
+				self.text.set_value(text);
+				return Err(format!("The template for {} has a mistake: {mistake}", kind.title().to_lowercase()));
+			}
+			templates.set(*kind, text);
+		}
+		Ok(templates)
+	}
 }
 
 /// The page for what most people never change: how much goes in the log, and where it is.

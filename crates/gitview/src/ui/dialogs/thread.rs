@@ -15,9 +15,12 @@ use wxdragon::{
 };
 
 use super::{comment::post_comment, open_on_enter, page::show_page};
-use crate::ui::{
-	live, notice,
-	text::{body_html, comment_count, local_time},
+use crate::{
+	template,
+	ui::{
+		live, notice,
+		text::{body_html, comment_count, local_time},
+	},
 };
 
 const THREAD_SIZE: Size = Size { width: 700, height: 450 };
@@ -26,6 +29,18 @@ const ID_REPLY: i32 = ID_HIGHEST + 201;
 const ID_COPY_TEXT: i32 = ID_HIGHEST + 202;
 const ID_COPY_LINK: i32 = ID_HIGHEST + 203;
 const ID_OPEN_IN_BROWSER: i32 = ID_HIGHEST + 204;
+
+/// A post as its template shows it. `opened` is the kind of thread, for the post that opened it.
+fn post_label(author: &str, time: &str, opened: Option<&str>, text: &str) -> String {
+	let context = minijinja::context! {
+		author,
+		time,
+		text,
+		opening => opened.is_some(),
+		kind => opened.unwrap_or_default(),
+	};
+	template::render(template::Kind::Post, &context)
+}
 
 /// One entry in the thread: the issue's own description, or a comment on it.
 #[derive(Clone)]
@@ -42,11 +57,19 @@ struct Post {
 }
 
 impl Post {
-	fn new(heading: String, meta: String, html: String, markdown: Option<&str>, url: &str) -> Self {
+	/// A post, whose list row `label` makes from its text.
+	fn new(
+		heading: String,
+		meta: String,
+		html: String,
+		markdown: Option<&str>,
+		url: &str,
+		label: impl FnOnce(&str) -> String,
+	) -> Self {
 		let text = html_to_text(&html);
 		let text = if text.is_empty() { "No text.".to_owned() } else { text };
 		Self {
-			label: format!("{}:\n{text}", if meta.is_empty() { &heading } else { &meta }),
+			label: label(&text),
 			heading,
 			meta,
 			html,
@@ -57,22 +80,26 @@ impl Post {
 
 	fn of_issue(issue: &Issue) -> Self {
 		let kind = if issue.is_pull_request() { "pull request" } else { "issue" };
+		let (author, time) = (issue.user.login.as_str(), local_time(&issue.created_at));
 		Self::new(
 			format!("{} #{}", issue.title, issue.number),
-			format!("{} opened this {kind} on {}", issue.user.login, local_time(&issue.created_at)),
+			format!("{author} opened this {kind} on {time}"),
 			body_html(issue.body_html.as_deref(), issue.body.as_deref()),
 			issue.body.as_deref(),
 			&issue.html_url,
+			|text| post_label(author, &time, Some(kind), text),
 		)
 	}
 
 	fn of_comment(comment: &Comment) -> Self {
+		let (author, time) = (comment.user.login.as_str(), local_time(&comment.created_at));
 		Self::new(
-			format!("{} commented on {}", comment.user.login, local_time(&comment.created_at)),
+			format!("{author} commented on {time}"),
 			String::new(),
 			body_html(comment.body_html.as_deref(), comment.body.as_deref()),
 			comment.body.as_deref(),
 			&comment.html_url,
+			|text| post_label(author, &time, None, text),
 		)
 	}
 

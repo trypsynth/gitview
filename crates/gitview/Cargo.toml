@@ -16,6 +16,7 @@ key-chord = "0.2.2"
 keyring = "4.2.0"
 live-region = "0.3.3"
 logkeeper = "0.1.0"
+minijinja = { version = "3.1.0", default-features = false, features = ["macros"] }
 quiet-list = "0.1.1"
 serde = { version = "1.0.229", features = ["derive"] }
 toml = "1.2.0"
