@@ -13,7 +13,11 @@ use key_chord::KeyChord;
 use quiet_list::{QuietList, Select};
 use serde::de::DeserializeOwned;
 use wx_utils::tasks::{background_blocking, spawn_for};
-use wxdragon::{clipboard::Clipboard, prelude::*};
+use wxdragon::{
+	clipboard::Clipboard,
+	prelude::*,
+	utils::{BrowserLaunchFlags, launch_default_browser},
+};
 
 use super::{actions::Action, dialogs::is_plain_enter, keymap::Command, notice, sectioned::SectionedLists};
 use crate::config::{self, Lists};
@@ -251,14 +255,15 @@ pub struct RowActions<S> {
 	pub link: Link<S>,
 }
 
-/// Opens rows on Enter or a double-click, and copies a row, or its link, on the keys the main
-/// window's Copy and Copy link have. A message row has no key, so it opens nothing and has no
-/// link, but copies like any other row. What copying did is said through `live_region`.
+/// Opens rows on Enter or a double-click, and copies a row or its link, or opens the link in the
+/// browser, on the keys the main window's Copy, Copy link and Open in browser have. A message row
+/// has no key, so it opens nothing and has no link, but copies like any other row. What a key did
+/// is said through `live_region`.
 pub fn on_rows<S: FeedSection>(sections: &SectionedLists<S>, live_region: StaticText, actions: RowActions<S>) {
 	let actions = Rc::new(actions);
 	let shortcuts = config::load().shortcuts;
-	let (copy, copy_link) =
-		(Command::Item(Action::Copy).chord(&shortcuts), Command::Item(Action::CopyLink).chord(&shortcuts));
+	let chord = |action| Command::Item(action).chord(&shortcuts);
+	let keys = Rc::new([chord(Action::Copy), chord(Action::CopyLink), chord(Action::OpenInBrowser)]);
 	for (section, list) in sections.lists() {
 		let opener = {
 			let (list, actions) = (Rc::downgrade(list), Rc::clone(&actions));
@@ -270,8 +275,7 @@ pub fn on_rows<S: FeedSection>(sections: &SectionedLists<S>, live_region: Static
 		};
 		let open_on_activate = Rc::clone(&opener);
 		list.on_activate(move || open_on_activate());
-		let (reached, actions, copy, copy_link) =
-			(Rc::downgrade(list), Rc::clone(&actions), copy.clone(), copy_link.clone());
+		let (reached, actions, keys) = (Rc::downgrade(list), Rc::clone(&actions), Rc::clone(&keys));
 		list.on_key_down(move |event| {
 			if is_plain_enter(event) {
 				opener();
@@ -288,15 +292,25 @@ pub fn on_rows<S: FeedSection>(sections: &SectionedLists<S>, live_region: Static
 					.as_ref()
 					.is_some_and(|chord| chord.matches(code, key.control_down(), key.alt_down(), key.shift_down()))
 			};
-			if pressed(&copy) {
+			let [copy, copy_link, open_in_browser] = &*keys;
+			let link = || list.selected().filter(|key| !key.is_empty()).map(|key| (actions.link)(section, &key));
+			if pressed(copy) {
 				if let Some(label) = list.selected_label() {
 					copy_text(live_region, &label, "Copied.");
 				}
-			} else if pressed(&copy_link) {
-				let key = list.selected().filter(|key| !key.is_empty());
-				match key.map(|key| (actions.link)(section, &key)) {
+			} else if pressed(copy_link) {
+				match link() {
 					Some(url) => copy_text(live_region, &url, "Link copied."),
 					None => live_region::announce(live_region, "No link to copy."),
+				}
+			} else if pressed(open_in_browser) {
+				match link() {
+					Some(url) => {
+						// Said first, before the browser takes the screen reader's attention.
+						live_region::announce(live_region, "Opening in browser.");
+						launch_default_browser(&url, BrowserLaunchFlags::Default);
+					}
+					None => live_region::announce(live_region, "No link to open."),
 				}
 			} else {
 				return false;
