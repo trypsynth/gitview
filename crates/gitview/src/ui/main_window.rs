@@ -285,6 +285,29 @@ impl MainWindow {
 		});
 		let window = self.clone();
 		self.sections.on_section_changed(move |view| window.show_view(view));
+		let window = self.clone();
+		self.sections.on_sections_key_down(move |event| {
+			let WindowEventData::Keyboard(key) = event else {
+				return false;
+			};
+			let Some(code) = key.get_key_code() else {
+				return false;
+			};
+			let pressed = |command: Command| {
+				command
+					.chord(&window.shortcuts.borrow())
+					.is_some_and(|chord| chord.matches(code, key.control_down(), key.alt_down(), key.shift_down()))
+			};
+			let down = if pressed(Command::MoveViewUp) {
+				false
+			} else if pressed(Command::MoveViewDown) {
+				true
+			} else {
+				return false;
+			};
+			window.move_view(down);
+			true
+		});
 		for (_, list) in self.sections.lists() {
 			let window = self.clone();
 			list.on_activate(move || window.perform(Action::Open));
@@ -480,10 +503,7 @@ impl MainWindow {
 			tracing::info!(level = %log_level, "log level changed");
 			config.log_level = Some(log_level.to_string());
 		}
-		config.views = config::Views {
-			order: arrangement.iter().map(|(view, _)| view.id().to_owned()).collect(),
-			hidden: arrangement.iter().filter(|(_, shown)| !shown).map(|(view, _)| view.id().to_owned()).collect(),
-		};
+		config.views = views_setting(&arrangement);
 		if arrangement != current.views {
 			tracing::info!(order = ?config.views.order, hidden = ?config.views.hidden, "views changed");
 		}
@@ -496,6 +516,45 @@ impl MainWindow {
 		}
 		self.state.borrow_mut().arrangement = arrangement;
 		self.fill_views();
+	}
+
+	/// Moves the view on screen up the Views list, or down it, past any hidden views, saves the new
+	/// order, and says where the view landed.
+	fn move_view(&self, down: bool) {
+		let (moved, order) = {
+			let mut state = self.state.borrow_mut();
+			let view = state.view;
+			let shown = shown(&state.arrangement);
+			let Some(index) = shown.iter().position(|shown| *shown == view) else {
+				return;
+			};
+			let target = if down { index + 1 } else { index.wrapping_sub(1) };
+			let Some(&neighbour) = shown.get(target) else {
+				drop(state);
+				self.announce(if down { "Cannot move down." } else { "Cannot move up." });
+				return;
+			};
+			let position = |wanted: View| state.arrangement.iter().position(|(view, _)| *view == wanted);
+			let (Some(from), Some(to)) = (position(view), position(neighbour)) else {
+				return;
+			};
+			state.arrangement.swap(from, to);
+			(view, shown_after_move(&shown, index, target))
+		};
+		self.sections.set_order(&order);
+		let mut config = config::load();
+		config.views = views_setting(&self.state.borrow().arrangement);
+		tracing::info!(order = ?config.views.order, "views reordered");
+		if let Err(error) = config::save(&config) {
+			notice::warning(
+				&self.frame,
+				format!(
+					"Gitview could not save the order of your views, so it will only last until it closes. {error}"
+				),
+				"Views Not Saved",
+			);
+		}
+		self.announce(&moved_message(&order, moved));
 	}
 
 	/// Lists the shown views in their chosen order. The view on screen stays when it is still
@@ -987,6 +1046,35 @@ impl MainWindow {
 	}
 }
 
+/// `arrangement` as the settings file keeps it.
+fn views_setting(arrangement: &[(View, bool)]) -> config::Views {
+	config::Views {
+		order: arrangement.iter().map(|(view, _)| view.id().to_owned()).collect(),
+		hidden: arrangement.iter().filter(|(_, shown)| !shown).map(|(view, _)| view.id().to_owned()).collect(),
+	}
+}
+
+/// `shown` with the views at `from` and `to` traded places.
+fn shown_after_move(shown: &[View], from: usize, to: usize) -> Vec<View> {
+	let mut order = shown.to_vec();
+	order.swap(from, to);
+	order
+}
+
+/// Where `moved` now sits in `order`, said by the views around it, as Fedra says it of
+/// timelines.
+fn moved_message(order: &[View], moved: View) -> String {
+	let index = order.iter().position(|view| *view == moved).unwrap_or_default();
+	let before = index.checked_sub(1).and_then(|index| order.get(index)).map(|view| view.title());
+	let after = order.get(index + 1).map(|view| view.title());
+	match (before, after) {
+		(Some(before), Some(after)) => format!("Moved between {before} and {after}."),
+		(Some(before), None) => format!("Moved after {before}."),
+		(None, Some(after)) => format!("Moved before {after}."),
+		(None, None) => format!("Moved {}.", moved.title()),
+	}
+}
+
 /// The views the Views list shows, in order. Never empty: were every view hidden, as a hand-edited
 /// config file could have it, all of them are shown instead.
 fn shown(arrangement: &[(View, bool)]) -> Vec<View> {
@@ -1096,7 +1184,15 @@ fn issue_label(issue: &Issue) -> String {
 
 #[cfg(test)]
 mod tests {
-	use super::parse_issue_reference;
+	use super::{View, moved_message, parse_issue_reference};
+
+	#[test]
+	fn a_moved_view_is_placed_by_its_neighbours() {
+		let order = [View::Starred, View::Notifications, View::Repositories];
+		assert_eq!(moved_message(&order, View::Starred), "Moved before Notifications.");
+		assert_eq!(moved_message(&order, View::Notifications), "Moved between Starred and Repositories.");
+		assert_eq!(moved_message(&order, View::Repositories), "Moved after Notifications.");
+	}
 
 	#[test]
 	fn issue_references_name_a_repository_and_number() {

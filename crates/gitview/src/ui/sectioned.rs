@@ -113,6 +113,16 @@ impl<S: Copy + Eq + 'static> SectionedLists<S> {
 		sizer
 	}
 
+	/// Shows `hook` each key pressed in the Sections list before the list acts on it. It returns
+	/// whether it handled the key, in which case the list leaves it alone.
+	pub fn on_sections_key_down(&self, hook: impl Fn(&WindowEventData) -> bool + 'static) {
+		self.inner.sections.on_key_down(move |event| {
+			// Said either way: a key left unsaid still goes on to the list, which would move the
+			// selection after the hook had moved the section.
+			event.skip(!hook(&event));
+		});
+	}
+
 	/// Runs `changed` with the section the user or [`set_order`](Self::set_order) moved to.
 	pub fn on_section_changed(&self, changed: impl Fn(S) + 'static) {
 		*self.inner.changed.borrow_mut() = Some(Rc::new(changed));
