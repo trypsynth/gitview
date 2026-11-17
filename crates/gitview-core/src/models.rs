@@ -63,9 +63,9 @@ pub struct Commit {
 	pub sha: String,
 	pub html_url: String,
 	pub commit: CommitData,
-	/// The account the commit's author address belongs to, which an address GitHub doesn't know
-	/// leaves out.
-	pub author: Option<User>,
+	/// The account the commit's author address belongs to. An address GitHub doesn't know leaves
+	/// it out, or sends an empty one.
+	pub author: Option<CommitAccount>,
 }
 
 impl Commit {
@@ -90,8 +90,15 @@ impl Commit {
 	/// The author's GitHub login, or the name in the commit when the address has no account.
 	#[must_use]
 	pub fn author_name(&self) -> &str {
-		self.author.as_ref().map_or(&self.commit.author.name, |user| &user.login)
+		self.author.as_ref().and_then(|account| account.login.as_deref()).unwrap_or(&self.commit.author.name)
 	}
+}
+
+/// The GitHub account behind a commit. Its login is missing when GitHub sends an empty account,
+/// as it does for some addresses it can't match, such as a bot's.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CommitAccount {
+	pub login: Option<String>,
 }
 
 /// The commit as git records it, apart from where it sits in the history.
@@ -305,7 +312,7 @@ impl SubjectDetails {
 
 #[cfg(test)]
 mod tests {
-	use super::{Commit, CommitData, GitAuthor, User};
+	use super::{Commit, CommitAccount, CommitData, GitAuthor};
 
 	fn commit(message: &str, author: Option<&str>) -> Commit {
 		Commit {
@@ -315,7 +322,7 @@ mod tests {
 				message: message.to_owned(),
 				author: GitAuthor { name: "Quin Gillespie".to_owned(), date: String::new() },
 			},
-			author: author.map(|login| User { login: login.to_owned(), name: None }),
+			author: author.map(|login| CommitAccount { login: Some(login.to_owned()) }),
 		}
 	}
 
@@ -348,6 +355,16 @@ mod tests {
 		assert!(merged.is_pull_request() && merged.is_merged());
 		let unmerged = issue("closed", "null", r#"{"url": "u", "merged_at": null}"#);
 		assert!(unmerged.is_pull_request() && !unmerged.is_merged());
+	}
+
+	#[test]
+	fn an_empty_account_falls_back_to_the_name_in_the_commit() {
+		let commit: Commit = serde_json::from_str(
+			r#"{"sha": "8306b27", "html_url": "", "author": {},
+			"commit": {"message": "Refactor", "author": {"name": "Sourcery AI", "date": ""}}}"#,
+		)
+		.expect("a commit whose author GitHub couldn't match");
+		assert_eq!(commit.author_name(), "Sourcery AI");
 	}
 
 	#[test]
