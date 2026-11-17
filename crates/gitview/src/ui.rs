@@ -1,5 +1,6 @@
 mod actions;
 mod dialogs;
+mod feed;
 mod hotkeys;
 mod keymap;
 mod live;

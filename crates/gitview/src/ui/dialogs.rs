@@ -33,7 +33,7 @@ fn open_on_enter(dialog: Dialog, list: ListBox, open: impl Fn() + 'static) {
 }
 
 /// Whether `event` is Enter pressed with no modifier.
-fn is_plain_enter(event: &WindowEventData) -> bool {
+pub fn is_plain_enter(event: &WindowEventData) -> bool {
 	matches!(event, WindowEventData::Keyboard(key)
 		if matches!(key.get_key_code(), Some(WXK_RETURN | WXK_NUMPAD_ENTER))
 			&& !(key.control_down() || key.alt_down() || key.shift_down()))
