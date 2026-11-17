@@ -34,6 +34,10 @@ pub trait FeedSection: Copy + Eq + 'static {
 	fn title(self) -> &'static str;
 	/// What the section says when it has nothing to list.
 	fn empty_message(self) -> &'static str;
+	/// Whether the section runs the way the lists setting says, rather than always newest first.
+	fn follows_order(self) -> bool {
+		true
+	}
 }
 
 /// A list GitHub hands out a page at a time, and the sections it feeds.
@@ -97,7 +101,7 @@ fn show<S: FeedSection, T>(feed: &Shared<S, T>, select: &Select<String>) {
 		.iter()
 		.map(|(section, list, rows)| {
 			let mut rows = rows.clone();
-			if feed.oldest_first {
+			if feed.oldest_first && section.follows_order() {
 				rows.reverse();
 			}
 			(Rc::clone(list), rows, section.empty_message())
@@ -215,6 +219,7 @@ pub fn fill(list: &QuietList<String>, rows: Rows, message: &str, select: Select<
 /// callback holds it weakly, so the lists can go once the dialog closes.
 pub fn on_reaching_oldest<S: FeedSection>(sections: &SectionedLists<S>, lists: Lists, at_end: &Rc<dyn Fn(S)>) {
 	for (section, list) in sections.lists() {
+		let lists = Lists { oldest_first: lists.oldest_first && section.follows_order(), ..lists };
 		let (reached, at_end) = (Rc::downgrade(list), Rc::clone(at_end));
 		list.on_selection_changed(move || {
 			if let Some(list) = reached.upgrade()

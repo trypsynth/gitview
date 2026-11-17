@@ -60,6 +60,12 @@ impl FeedSection for Section {
 			Self::Following => "Not following anyone.",
 		}
 	}
+
+	/// The profile reads top to bottom, and people always come most recent first: GitHub gives no
+	/// way to start from the other end of a famous account's thousands of followers.
+	fn follows_order(self) -> bool {
+		matches!(self, Self::Repositories | Self::Starred)
+	}
 }
 
 impl Section {
@@ -90,12 +96,18 @@ fn show_user_dialog(parent: &dyn WxWidget, client: Arc<Client>, profile: &UserPr
 		.map_or_else(|| login.clone(), |name| format!("{name} ({login})"));
 	let dialog = Dialog::builder(parent, &title).build();
 	let padding = dialog_padding(&dialog);
-	let sections = SectionedLists::new(&dialog, "Sections", &Section::ALL.map(|section| (section, section.title())));
+	// An organization stars nothing and follows no one, and GitHub lists no organization's
+	// followers newest first, so it shows only its profile and repositories.
+	let shown: Vec<_> = Section::ALL
+		.into_iter()
+		.filter(|section| !profile.is_organization() || matches!(section, Section::Profile | Section::Repositories))
+		.map(|section| (section, section.title()))
+		.collect();
+	let sections = SectionedLists::new(&dialog, "Sections", &shown);
 	let lists = config::load().lists;
 	for (section, list) in sections.lists() {
 		list.set_min_size(LIST_SIZE);
-		// The profile reads top to bottom, whichever way the other lists run.
-		list.set_start_at_end(lists.oldest_first && section != Section::Profile);
+		list.set_start_at_end(lists.oldest_first && section.follows_order());
 	}
 	let close_button = Button::builder(&dialog).with_id(ID_CANCEL).with_label("Close").build();
 	dialog.set_escape_id(ID_CANCEL);

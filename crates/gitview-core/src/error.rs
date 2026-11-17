@@ -16,6 +16,9 @@ pub enum Error {
 	Auth(String),
 	#[error(transparent)]
 	Http(ureq::Error),
+	/// GitHub's GraphQL API answered, but with an error instead of what was asked for.
+	#[error("{0}")]
+	Graph(String),
 }
 
 impl Error {

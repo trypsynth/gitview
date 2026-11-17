@@ -9,7 +9,7 @@ use crate::{
 		CloseReason, Comment, Commit, CommitDetails, Email, Issue, IssueState, Notification, Profile, ProfileUpdate,
 		Repository, SocialAccount, SubjectDetails, User, UserProfile,
 	},
-	page::{Cursor, Kind, Page, link},
+	page::{At, Connection, Cursor, Kind, Page, link},
 };
 
 const API_URL: &str = "https://api.github.com";
@@ -18,8 +18,8 @@ const API_VERSION: &str = "2022-11-28";
 // mentions and task lists already in place.
 const HTML_ACCEPT: &str = "application/vnd.github.full+json";
 const USER_AGENT: &str = concat!("gitview/", env!("CARGO_PKG_VERSION"));
-/// How many items a page of a list read [newest first](Client::newest_first) holds, the most
-/// GitHub allows.
+/// How many items a page of a list read [newest first](Client::newest_first), or of a GraphQL
+/// connection, holds: the most GitHub allows.
 const PAGE_SIZE: usize = 100;
 /// How long to wait before asking again after GitHub has a server error.
 const SERVER_ERROR_WAIT: Duration = Duration::from_secs(1);
@@ -51,6 +51,55 @@ struct SocialAccountUrls<'a> {
 #[derive(Deserialize)]
 struct SearchResults<T> {
 	items: Vec<T>,
+}
+
+#[derive(Serialize)]
+struct GraphRequest<'a> {
+	query: &'a str,
+	variables: ConnectionVariables<'a>,
+}
+
+#[derive(Serialize)]
+struct ConnectionVariables<'a> {
+	login: &'a str,
+	after: Option<&'a str>,
+}
+
+#[derive(Deserialize)]
+struct GraphResponse<T> {
+	data: Option<UserData<T>>,
+	#[serde(default)]
+	errors: Vec<GraphError>,
+}
+
+#[derive(Deserialize)]
+struct GraphError {
+	message: String,
+}
+
+#[derive(Deserialize)]
+struct UserData<T> {
+	user: Option<UserList<T>>,
+}
+
+/// The one connection asked for, under the alias `list`.
+#[derive(Deserialize)]
+struct UserList<T> {
+	list: GraphList<T>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GraphList<T> {
+	nodes: Vec<T>,
+	page_info: PageInfo,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PageInfo {
+	has_next_page: bool,
+	end_cursor: Option<String>,
 }
 
 pub struct Client {
@@ -202,14 +251,14 @@ impl Client {
 		self.fetch_page(&format!("/users/{login}/starred?sort=created&direction=desc&per_page=100"), Kind::Plain)
 	}
 
-	/// Who follows `login`, most recent first.
+	/// Who follows `login`, most recent first. Only users have followers to list.
 	pub fn followers(&self, login: &str) -> Result<Page<User>, Error> {
-		self.newest_first(&format!("/users/{login}/followers?per_page={PAGE_SIZE}"))
+		self.connection_page(Connection::Followers, login, None)
 	}
 
-	/// Who `login` follows, most recent first.
+	/// Who `login` follows, most recent first. GitHub lists only the people, not organizations.
 	pub fn following(&self, login: &str) -> Result<Page<User>, Error> {
-		self.newest_first(&format!("/users/{login}/following?per_page={PAGE_SIZE}"))
+		self.connection_page(Connection::Following, login, None)
 	}
 
 	/// The newest commits on the default branch of `repo` (`owner/name`). A repository with no
@@ -330,16 +379,7 @@ impl Client {
 	fn newest_first<T: DeserializeOwned>(&self, path: &str) -> Result<Page<T>, Error> {
 		let (mut first, last) = self.fetch_page_links(path, Kind::Plain, false)?;
 		if let Some(last) = last {
-			let mut page = match self.fetch_cursor(&Cursor::new(last, Kind::Plain, true)) {
-				Ok(page) => page,
-				// A list so long GitHub can't reach its end in time, such as a famous account's
-				// followers, is read from its start instead: oldest first, but there to read.
-				Err(Error::Http(ureq::Error::StatusCode(500..=599))) => {
-					tracing::warn!(path, "couldn't reach the newest end of the list, so reading it oldest first");
-					return Ok(first);
-				}
-				Err(error) => return Err(error),
-			};
+			let mut page = self.fetch_cursor(&Cursor::new(last, Kind::Plain, true))?;
 			// The last page can hold only a few, which would open the list nearly empty.
 			if page.items.len() < PAGE_SIZE / 2 {
 				self.load_pages(&mut page, 1)?;
@@ -357,7 +397,41 @@ impl Client {
 	}
 
 	fn fetch_cursor<T: DeserializeOwned>(&self, cursor: &Cursor<T>) -> Result<Page<T>, Error> {
-		Ok(self.fetch_page_links(&cursor.path, cursor.kind, cursor.backwards)?.0)
+		match &cursor.at {
+			At::Rest { path, kind, backwards } => Ok(self.fetch_page_links(path, *kind, *backwards)?.0),
+			At::Graph { connection, login, after } => self.connection_page(*connection, login, Some(after)),
+		}
+	}
+
+	/// A page of `login`'s `connection`, from GitHub's GraphQL API, after the cursor `after`, or
+	/// its first page without one. Its nodes come as `T`, with each user's login and name.
+	fn connection_page<T: DeserializeOwned>(
+		&self,
+		connection: Connection,
+		login: &str,
+		after: Option<&str>,
+	) -> Result<Page<T>, Error> {
+		let field = connection.field();
+		tracing::debug!(login, field, "fetching from GraphQL");
+		let query = format!(
+			"query($login: String!, $after: String) {{ user(login: $login) {{ list: {field}(first: {PAGE_SIZE}, \
+			 after: $after) {{ nodes {{ login name }} pageInfo {{ hasNextPage endCursor }} }} }} }}"
+		);
+		let response: GraphResponse<T> = self
+			.authorize(self.agent.post(format!("{API_URL}/graphql")))
+			.send_json(GraphRequest { query: &query, variables: ConnectionVariables { login, after } })?
+			.body_mut()
+			.read_json()?;
+		let Some(list) = response.data.and_then(|data| data.user).map(|user| user.list) else {
+			let message = response.errors.into_iter().next().map(|error| error.message);
+			return Err(Error::Graph(message.unwrap_or_else(|| format!("GitHub has no user {login}"))));
+		};
+		let next = list
+			.page_info
+			.end_cursor
+			.filter(|_| list.page_info.has_next_page)
+			.map(|after| Cursor::graph(connection, login.to_owned(), after));
+		Ok(Page { items: list.nodes, next })
 	}
 
 	/// One page of a list at `path`, with where the next page is, as GitHub's `Link` header says,

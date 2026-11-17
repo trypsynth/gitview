@@ -20,24 +20,58 @@ impl<T> Page<T> {
 /// follows it, so a cursor for one kind of list can't load another.
 #[derive(Debug)]
 pub struct Cursor<T> {
-	/// The page's path under the API, never a whole URL, so the token can't travel elsewhere.
-	pub(crate) path: String,
-	pub(crate) kind: Kind,
-	/// Whether the list is read from its last page to its first, each page back to front, for a
-	/// list GitHub can only give oldest first.
-	pub(crate) backwards: bool,
+	pub(crate) at: At,
 	items: PhantomData<fn() -> T>,
+}
+
+/// Where a page is.
+#[derive(Debug, Clone)]
+pub enum At {
+	/// A REST page.
+	Rest {
+		/// The page's path under the API, never a whole URL, so the token can't travel elsewhere.
+		path: String,
+		kind: Kind,
+		/// Whether the list is read from its last page to its first, each page back to front,
+		/// for a list GitHub can only give oldest first.
+		backwards: bool,
+	},
+	/// A page of one of a user's GraphQL connections, after the GraphQL cursor `after`.
+	Graph { connection: Connection, login: String, after: String },
+}
+
+/// A user's list that only GraphQL gives in a useful order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Connection {
+	/// Who follows them, most recent first. REST gives them by account age instead.
+	Followers,
+	/// Who they follow, most recent first.
+	Following,
+}
+
+impl Connection {
+	/// The connection's field on a GraphQL `User`.
+	pub(crate) const fn field(self) -> &'static str {
+		match self {
+			Self::Followers => "followers",
+			Self::Following => "following",
+		}
+	}
 }
 
 impl<T> Cursor<T> {
 	pub(crate) const fn new(path: String, kind: Kind, backwards: bool) -> Self {
-		Self { path, kind, backwards, items: PhantomData }
+		Self { at: At::Rest { path, kind, backwards }, items: PhantomData }
+	}
+
+	pub(crate) const fn graph(connection: Connection, login: String, after: String) -> Self {
+		Self { at: At::Graph { connection, login, after }, items: PhantomData }
 	}
 }
 
 impl<T> Clone for Cursor<T> {
 	fn clone(&self) -> Self {
-		Self::new(self.path.clone(), self.kind, self.backwards)
+		Self { at: self.at.clone(), items: PhantomData }
 	}
 }
 
