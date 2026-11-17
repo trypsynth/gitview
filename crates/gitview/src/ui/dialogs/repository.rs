@@ -270,19 +270,30 @@ impl<T> Feed<T> {
 	fn empty_sections(&self) -> Vec<Section> {
 		self.lists.iter().filter(|(_, _, rows)| rows.is_empty()).map(|(section, _, _)| *section).collect()
 	}
+}
 
-	/// Puts each section's rows in its list, or its message when it has none.
-	fn show(&self, select: &Select<String>) {
-		for (section, list, rows) in &self.lists {
-			fill(list, rows.clone(), section.empty_message(), select.clone());
-		}
+/// Puts each section's rows in its list, or its message when it has none.
+///
+/// The feed is let go before any list is filled: filling a list runs its selection callback,
+/// and reaching a list's end from there loads more of this same feed.
+fn show<T>(feed: &Shared<T>, select: &Select<String>) {
+	let shown: Vec<_> = feed
+		.borrow()
+		.lists
+		.iter()
+		.map(|(section, list, rows)| (Rc::clone(list), rows.clone(), section.empty_message()))
+		.collect();
+	for (list, rows, message) in shown {
+		fill(&list, rows, message, select.clone());
 	}
+}
 
-	fn show_failure(&self) {
-		for (section, list, _) in &self.lists {
-			let message = format!("Could not load {}.", section.title().to_lowercase());
-			fill(list, Vec::new(), &message, Select::Start);
-		}
+/// Says in each of the feed's lists that its first page couldn't be loaded.
+fn show_failure<T>(feed: &Shared<T>) {
+	let lists: Vec<_> = feed.borrow().lists.iter().map(|(section, list, _)| (*section, Rc::clone(list))).collect();
+	for (section, list) in lists {
+		let message = format!("Could not load {}.", section.title().to_lowercase());
+		fill(&list, Vec::new(), &message, Select::Start);
 	}
 }
 
@@ -303,19 +314,19 @@ fn start<T: DeserializeOwned + Send + 'static>(
 					let mut inner = feed.borrow_mut();
 					inner.add(&page.items);
 					inner.next = page.next;
-					inner.show(&Select::Start);
 					inner.empty_sections()
 				};
+				show(&feed, &Select::Start);
 				let result = read_on(&client, &feed, empty).await;
 				feed.borrow_mut().loading = false;
-				feed.borrow().show(&Select::Keep);
+				show(&feed, &Select::Keep);
 				if let Err(error) = result {
 					notice::error(&dialog, error, failed_title);
 				}
 			}
 			Err(error) => {
 				feed.borrow_mut().loading = false;
-				feed.borrow().show_failure();
+				show_failure(&feed);
 				notice::error(&dialog, error, failed_title);
 			}
 		}
@@ -341,7 +352,7 @@ fn load_more<T: DeserializeOwned + Send + 'static>(
 	spawn_for(&dialog, async move {
 		let result = read_on(&client, &feed, vec![section]).await;
 		feed.borrow_mut().loading = false;
-		feed.borrow().show(&Select::Keep);
+		show(&feed, &Select::Keep);
 		if let Err(error) = result {
 			notice::error(&dialog, error, "Could Not Load More");
 		}
