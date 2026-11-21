@@ -47,8 +47,6 @@ pub fn show_settings_dialog(parent: &dyn WxWidget, settings: &Settings, log_fold
 	let padding = dialog_padding(&dialog);
 	let notebook = Notebook::builder(&dialog).build();
 	let views_page = Panel::builder(&notebook).build();
-	#[cfg(target_os = "windows")]
-	views_page.set_accessibility_role(AccRole::PropertyPage);
 	// The order is changed in the main window, with Move view up and down in its Views list.
 	let label = StaticText::builder(&views_page).with_label("&Views to show:").build();
 	let list = CheckListBox::builder(&views_page).with_size(LIST_SIZE).build();
@@ -59,7 +57,7 @@ pub fn show_settings_dialog(parent: &dyn WxWidget, settings: &Settings, log_fold
 	page.add(&label, 0, SizerFlag::Left | SizerFlag::Right | SizerFlag::Top, padding);
 	page.add(&list, 1, SizerFlag::Expand | SizerFlag::All, padding);
 	views_page.set_sizer(page, true);
-	notebook.add_page(&views_page, "Views", true, None);
+	add_page(notebook, views_page, "Views", true);
 	let oldest_first = display_page(notebook, padding, settings.lists);
 	let templates = TemplatesPage::new(notebook, padding, &settings.templates);
 	let log_level = advanced_page(notebook, padding, settings.log_level, log_folder);
@@ -104,14 +102,12 @@ pub fn show_settings_dialog(parent: &dyn WxWidget, settings: &Settings, log_fold
 /// The page for which way lists run. Returns its checkbox.
 fn display_page(notebook: Notebook, padding: i32, lists: Lists) -> CheckBox {
 	let page = Panel::builder(&notebook).build();
-	#[cfg(target_os = "windows")]
-	page.set_accessibility_role(AccRole::PropertyPage);
 	let oldest_first = CheckBox::builder(&page).with_label("Show oldest entries &first").build();
 	oldest_first.set_value(lists.oldest_first);
 	let content = BoxSizer::builder(Orientation::Vertical).build();
 	content.add(&oldest_first, 0, SizerFlag::All, padding);
 	page.set_sizer(content, true);
-	notebook.add_page(&page, "Display", false, None);
+	add_page(notebook, page, "Display", false);
 	oldest_first
 }
 
@@ -129,8 +125,6 @@ struct TemplatesPage {
 impl TemplatesPage {
 	fn new(notebook: Notebook, padding: i32, templates: &Templates) -> Self {
 		let page = Panel::builder(&notebook).build();
-		#[cfg(target_os = "windows")]
-		page.set_accessibility_role(AccRole::PropertyPage);
 		let kinds_label = StaticText::builder(&page).with_label("&Template for:").build();
 		let kinds =
 			Choice::builder(&page).with_choices(Kind::ALL.iter().map(|kind| kind.title().to_owned()).collect()).build();
@@ -152,7 +146,7 @@ impl TemplatesPage {
 		content.add(&text, 1, SizerFlag::Expand | SizerFlag::All, padding);
 		content.add(&reset, 0, SizerFlag::Left | SizerFlag::Right | SizerFlag::Bottom, padding);
 		page.set_sizer(content, true);
-		notebook.add_page(&page, "Templates", false, None);
+		add_page(notebook, page, "Templates", false);
 		let templates_page =
 			Self { kinds, text, edited: Rc::new(RefCell::new(edited)), current: Rc::new(Cell::new(0)) };
 		let (edited, current) = (Rc::clone(&templates_page.edited), Rc::clone(&templates_page.current));
@@ -192,12 +186,19 @@ impl TemplatesPage {
 	}
 }
 
+/// Adds `page` to the notebook as `title`, named so a screen reader says which page it has
+/// switched to, rather than only that it's a property page.
+fn add_page(notebook: Notebook, page: Panel, title: &str, selected: bool) {
+	page.set_accessibility_label(title);
+	#[cfg(target_os = "windows")]
+	page.set_accessibility_role(AccRole::PropertyPage);
+	notebook.add_page(&page, title, selected, None);
+}
+
 /// The page for what most people never change: how much goes in the log, and where it is.
 /// Returns the log level choice.
 fn advanced_page(notebook: Notebook, padding: i32, level: Level, log_folder: &Path) -> Choice {
 	let page = Panel::builder(&notebook).build();
-	#[cfg(target_os = "windows")]
-	page.set_accessibility_role(AccRole::PropertyPage);
 	let label = StaticText::builder(&page).with_label("&Log level:").build();
 	let choice = Choice::builder(&page).build();
 	for (_, name) in LOG_LEVELS {
@@ -215,7 +216,7 @@ fn advanced_page(notebook: Notebook, padding: i32, level: Level, log_folder: &Pa
 	content.add_sizer(&row, 0, SizerFlag::All, padding);
 	content.add(&location, 0, SizerFlag::Left | SizerFlag::Right | SizerFlag::Bottom, padding);
 	page.set_sizer(content, true);
-	notebook.add_page(&page, "Advanced", false, None);
+	add_page(notebook, page, "Advanced", false);
 	choice
 }
 
