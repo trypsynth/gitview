@@ -1,0 +1,97 @@
+name: CI
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+# Pushing again while a run is going makes that run pointless, so the new one replaces it.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+jobs:
+  fmt:
+    name: Format check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: nightly
+          components: rustfmt
+      - name: Check formatting
+        run: cargo +nightly fmt --all --check
+  test:
+    name: Tests and clippy
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Setup MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          components: clippy
+      # The runner has CMake, and the MSVC step above puts Visual Studio's Ninja on the PATH.
+      # wxWidgets is built by wxdragon-sys, so only its locked version decides whether a cached build still fits.
+      # Hashing the whole Cargo.lock threw the cache away whenever any other crate changed.
+      - name: Find the locked wxdragon-sys
+        id: wxdragon
+        shell: bash
+        run: echo "hash=$(awk '/^name = "wxdragon-sys"/{f=1} f&&/^$/{exit} f' Cargo.lock | grep -E '^(version|source|checksum) ' | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
+      # wxdragon-sys downloads the wxWidgets release it's built for into an empty WXWIDGETS_DIR, so the source only changes with it.
+      - name: Cache wxWidgets source
+        id: wxwidgets-cache
+        uses: actions/cache@v6
+        with:
+          path: wxWidgets
+          key: wxwidgets-src-${{ steps.wxdragon.outputs.hash }}
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          # The wxWidgets build cache's key too, so a wxdragon-sys built against one wxWidgets build is never restored
+          # beside another, whose PDBs its objects don't match.
+          key: wx-${{ steps.wxdragon.outputs.hash }}-msvc${{ env.VCToolsVersion }}
+      # wxdragon-sys builds wxWidgets with CMake into target/debug/*_cmake_build.
+      # rust-cache wipes everything in target/debug except Cargo's own
+      # directories before saving, even paths passed as cache-directories, so
+      # these get their own cache. It has to come after rust-cache: post steps
+      # run in reverse, so this one saves before rust-cache's cleanup runs.
+      - name: Cache wxWidgets build
+        uses: actions/cache@v6
+        with:
+          path: |
+            target/debug/wxwidgets_cmake_build
+            target/debug/wxdragon_sys_cmake_build
+          # CMake keeps the toolset's linker path, which a runner image with a newer MSVC no longer has.
+          key: wx-cmake-${{ runner.os }}-${{ steps.wxdragon.outputs.hash }}-msvc${{ env.VCToolsVersion }}
+      # If the Rust cache hit but the wxWidgets one didn't, the restored
+      # fingerprint says wxdragon-sys is built while its libraries are missing,
+      # and linking fails on WebView2LoaderStatic.lib. Force it to rebuild.
+      - name: Rebuild wxdragon-sys if its CMake output is missing
+        shell: pwsh
+        run: |
+          # Through cargo rather than by deleting its folders, whose layout changes between Cargo versions.
+          if (-not (Test-Path target/debug/wxwidgets_cmake_build/libs/webview/packages)) {
+            cargo clean -p wxdragon-sys
+          }
+      # Clippy runs first so the dependency tree is built once, in the same
+      # profile the tests then reuse. Checking in release meant compiling
+      # everything a second time under LTO for no extra findings.
+      # The crate warns on clippy::all, pedantic and nursery, so -D warnings
+      # makes every one of those fatal here.
+      - name: Run clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+        env:
+          WXWIDGETS_DIR: ${{ github.workspace }}/wxWidgets
+      - name: Run tests
+        run: cargo test --workspace
+        env:
+          WXWIDGETS_DIR: ${{ github.workspace }}/wxWidgets
