@@ -1,0 +1,149 @@
+name: Build Gitview
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+# A run that has started finishes, so a burst of pushes still publishes a build; only the newest waiting push runs next.
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: false
+permissions:
+  contents: write
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+jobs:
+  build:
+    name: Build (${{ matrix.arch }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            arch: x64
+          - os: windows-11-arm
+            arch: arm64
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v7
+      with:
+        fetch-depth: 0
+    - name: Setup MSVC
+      uses: ilammy/msvc-dev-cmd@v1
+      with:
+        arch: ${{ matrix.arch }}
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        toolchain: stable
+    # The x64 runner has CMake, and the MSVC step puts Visual Studio's Ninja on the PATH.
+    - name: Install CMake and Ninja
+      if: matrix.arch == 'arm64'
+      uses: lukka/get-cmake@v4.5.0
+    # wxWidgets is built by wxdragon-sys, so only its locked version decides whether a cached build still fits.
+    - name: Find the locked wxdragon-sys
+      id: wxdragon
+      shell: bash
+      run: echo "hash=$(awk '/^name = "wxdragon-sys"/{f=1} f&&/^$/{exit} f' Cargo.lock | grep -E '^(version|source|checksum) ' | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
+    # wxdragon-sys downloads the wxWidgets release it's built for into an empty WXWIDGETS_DIR, so the source only changes with it.
+    - name: Cache wxWidgets source
+      id: wxwidgets-cache
+      uses: actions/cache@v6
+      with:
+        path: wxWidgets
+        key: wxwidgets-src-${{ steps.wxdragon.outputs.hash }}
+    - name: Cache Rust dependencies
+      uses: Swatinem/rust-cache@v2
+      with:
+        # With the wxWidgets build cache's key, so a wxdragon-sys built against one wxWidgets build is never restored beside
+        # another, whose PDBs its objects don't match. rust-cache ignores its key input once there's a shared key.
+        shared-key: release-windows-${{ matrix.arch }}-wx-${{ steps.wxdragon.outputs.hash }}-msvc${{ env.VCToolsVersion }}
+        save-if: ${{ github.ref == 'refs/heads/main' }}
+    # After the Rust cache, since post steps run in reverse: this one saves before rust-cache's cleanup would drop it.
+    - name: Cache wxWidgets build
+      uses: actions/cache@v6
+      with:
+        path: |
+          target/release/wxwidgets_cmake_build
+          target/release/wxdragon_sys_cmake_build
+        # CMake keeps the toolset's linker path, which a runner image with a newer MSVC no longer has.
+        key: wx-cmake-release-${{ runner.os }}-${{ matrix.arch }}-${{ steps.wxdragon.outputs.hash }}-msvc${{ env.VCToolsVersion }}
+    # A hit on the Rust cache with a miss on this one would leave wxdragon-sys counted as built with its libraries gone.
+    - name: Rebuild wxdragon-sys if its CMake output is missing
+      shell: pwsh
+      run: |
+        if (-not (Test-Path target/release/wxwidgets_cmake_build/libs/webview/packages)) {
+          cargo clean --release -p wxdragon-sys
+        }
+    - name: Build and package
+      env:
+        WXWIDGETS_DIR: ${{ github.workspace }}/wxWidgets
+      run: cargo xtask release
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v7
+      with:
+        name: gitview-build-${{ matrix.arch }}
+        path: |
+          target/release/gitview-${{ matrix.arch }}.zip
+          target/release/gitview_setup-${{ matrix.arch }}.exe
+        if-no-files-found: error
+        retention-days: 30
+  publish:
+    name: Publish latest release
+    needs: build
+    runs-on: ubuntu-latest
+    # Every run publishes to the same latest release, so two uploading at once could mix one run's assets with
+    # another's. Queue them instead.
+    concurrency:
+      group: dev-release
+      cancel-in-progress: false
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v7
+      with:
+        fetch-depth: 0
+    - name: Download artifacts
+      uses: actions/download-artifact@v8
+      with:
+        pattern: gitview-build-*
+        path: dist
+        merge-multiple: true
+    - name: Get latest tag reachable from HEAD
+      id: get_tag
+      run: |
+        # The latest tag is this release's own, so it never counts as the last version.
+        TAG=$(git describe --tags --abbrev=0 --exclude latest 2>/dev/null || echo "")
+        echo "tag=$TAG" >> $GITHUB_OUTPUT
+    # Before any version is tagged, the notes list the newest commits rather than every one.
+    - name: Generate release notes
+      id: release_notes
+      run: |
+        PREV_TAG="${{ steps.get_tag.outputs.tag }}"
+        if [ -z "$PREV_TAG" ]; then
+          COMMITS=$(git log -30 --pretty=format:"- %h: %s" HEAD)
+        else
+          COMMITS=$(git log --pretty=format:"- %h: %s" "$PREV_TAG"..HEAD)
+        fi
+        COMMITS="${COMMITS//'%'/'%25'}"
+        echo "commits<<EOF" >> $GITHUB_OUTPUT
+        echo "$COMMITS" >> $GITHUB_OUTPUT
+        echo "EOF" >> $GITHUB_OUTPUT
+    # The release action leaves an existing tag where it is, so the tag is moved to what was built.
+    - name: Move the latest tag to this commit
+      run: |
+        git tag -f latest "$GITHUB_SHA"
+        git push -f origin refs/tags/latest
+    - name: Create or update latest release
+      uses: softprops/action-gh-release@v3
+      with:
+        tag_name: latest
+        name: Development Build
+        body: |
+          ## Recent commits
+          ${{ steps.release_notes.outputs.commits }}
+        files: dist/*
+        prerelease: true
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
