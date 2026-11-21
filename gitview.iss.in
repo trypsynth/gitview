@@ -9,7 +9,7 @@
 	DisableProgramGroupPage=yes
 	DisableDirPage=yes
 	OutputDir=.
-	OutputBaseFilename=gitview_setup
+	OutputBaseFilename=gitview_setup-@ARCH_SUFFIX@
 	Compression=lzma2
 	SolidCompression=yes
 	WizardStyle=modern
