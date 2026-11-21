@@ -11,7 +11,7 @@ use wxdragon::accessible::AccRole;
 use wxdragon::prelude::*;
 
 use crate::{
-	config::Lists,
+	config::{Channel, Lists, Updates},
 	template::{self, Kind, Templates},
 	ui::view::View,
 };
@@ -30,6 +30,9 @@ const LOG_LEVELS: [(Level, &str); 6] = [
 	(Level::Trace, "Trace"),
 ];
 
+/// The update channels, with what the Update channel choice calls them.
+const CHANNELS: [(Channel, &str); 2] = [(Channel::Stable, "Releases"), (Channel::Dev, "Development builds")];
+
 /// What the Settings dialog changes.
 #[derive(Clone)]
 pub struct Settings {
@@ -37,6 +40,7 @@ pub struct Settings {
 	pub views: Vec<(View, bool)>,
 	pub lists: Lists,
 	pub templates: Templates,
+	pub updates: Updates,
 	pub log_level: Level,
 }
 
@@ -60,7 +64,7 @@ pub fn show_settings_dialog(parent: &dyn WxWidget, settings: &Settings, log_fold
 	add_page(notebook, views_page, "Views", true);
 	let oldest_first = display_page(notebook, padding, settings.lists);
 	let templates = TemplatesPage::new(notebook, padding, &settings.templates);
-	let log_level = advanced_page(notebook, padding, settings.log_level, log_folder);
+	let advanced = AdvancedPage::new(notebook, padding, settings, log_folder);
 	let content = BoxSizer::builder(Orientation::Vertical).build();
 	content.add(&notebook, 1, SizerFlag::Expand | SizerFlag::All, padding);
 	add_ok_cancel_footer(content, ok_button, cancel_button);
@@ -87,11 +91,12 @@ pub fn show_settings_dialog(parent: &dyn WxWidget, settings: &Settings, log_fold
 				continue;
 			}
 		};
-		let level = log_level.get_selection().and_then(|index| LOG_LEVELS.get(index as usize));
+		let level = advanced.log_level.get_selection().and_then(|index| LOG_LEVELS.get(index as usize));
 		break Some(Settings {
 			views: views.clone(),
 			lists: Lists { oldest_first: oldest_first.get_value() },
 			templates: edited,
+			updates: advanced.updates(settings.updates),
 			log_level: level.map_or(settings.log_level, |(level, _)| *level),
 		});
 	};
@@ -195,29 +200,61 @@ fn add_page(notebook: Notebook, page: Panel, title: &str, selected: bool) {
 	notebook.add_page(&page, title, selected, None);
 }
 
-/// The page for what most people never change: how much goes in the log, and where it is.
-/// Returns the log level choice.
-fn advanced_page(notebook: Notebook, padding: i32, level: Level, log_folder: &Path) -> Choice {
-	let page = Panel::builder(&notebook).build();
-	let label = StaticText::builder(&page).with_label("&Log level:").build();
-	let choice = Choice::builder(&page).build();
-	for (_, name) in LOG_LEVELS {
-		choice.append(name);
+/// The page for what most people never change: updates, how much goes in the log, and where it
+/// is.
+struct AdvancedPage {
+	channel: Choice,
+	check_on_startup: CheckBox,
+	log_level: Choice,
+}
+
+impl AdvancedPage {
+	fn new(notebook: Notebook, padding: i32, settings: &Settings, log_folder: &Path) -> Self {
+		let page = Panel::builder(&notebook).build();
+		let channel_label = StaticText::builder(&page).with_label("&Update channel:").build();
+		let channel = Choice::builder(&page).build();
+		for (_, name) in CHANNELS {
+			channel.append(name);
+		}
+		let chosen = CHANNELS.iter().position(|(channel, _)| *channel == settings.updates.channel).unwrap_or_default();
+		channel.set_selection(u32::try_from(chosen).unwrap_or_default());
+		let check_on_startup = CheckBox::builder(&page).with_label("&Check for updates when Gitview starts").build();
+		check_on_startup.set_value(settings.updates.check_on_startup);
+		let level_label = StaticText::builder(&page).with_label("&Log level:").build();
+		let log_level = Choice::builder(&page).build();
+		for (_, name) in LOG_LEVELS {
+			log_level.append(name);
+		}
+		let selected = LOG_LEVELS.iter().position(|(level, _)| *level == settings.log_level).unwrap_or_default();
+		log_level.set_selection(u32::try_from(selected).unwrap_or_default());
+		// Made after the choice, so no screen reader takes it for the choice's label.
+		let location = StaticText::builder(&page)
+			.with_label(&format!("The log is gitview.log, in {}.", log_folder.display()))
+			.build();
+		let row = |label: &StaticText, choice: &Choice| {
+			let row = BoxSizer::builder(Orientation::Horizontal).build();
+			row.add(label, 0, SizerFlag::AlignCenterVertical | SizerFlag::Right, padding);
+			row.add(choice, 0, SizerFlag::empty(), 0);
+			row
+		};
+		let content = BoxSizer::builder(Orientation::Vertical).build();
+		content.add_sizer(&row(&channel_label, &channel), 0, SizerFlag::All, padding);
+		content.add(&check_on_startup, 0, SizerFlag::Left | SizerFlag::Right | SizerFlag::Bottom, padding);
+		content.add_sizer(&row(&level_label, &log_level), 0, SizerFlag::All, padding);
+		content.add(&location, 0, SizerFlag::Left | SizerFlag::Right | SizerFlag::Bottom, padding);
+		page.set_sizer(content, true);
+		add_page(notebook, page, "Advanced", false);
+		Self { channel, check_on_startup, log_level }
 	}
-	let selected = LOG_LEVELS.iter().position(|(choice, _)| *choice == level).unwrap_or_default();
-	choice.set_selection(u32::try_from(selected).unwrap_or_default());
-	// Made after the choice, so no screen reader takes it for the choice's label.
-	let location =
-		StaticText::builder(&page).with_label(&format!("The log is gitview.log, in {}.", log_folder.display())).build();
-	let row = BoxSizer::builder(Orientation::Horizontal).build();
-	row.add(&label, 0, SizerFlag::AlignCenterVertical | SizerFlag::Right, padding);
-	row.add(&choice, 0, SizerFlag::empty(), 0);
-	let content = BoxSizer::builder(Orientation::Vertical).build();
-	content.add_sizer(&row, 0, SizerFlag::All, padding);
-	content.add(&location, 0, SizerFlag::Left | SizerFlag::Right | SizerFlag::Bottom, padding);
-	page.set_sizer(content, true);
-	add_page(notebook, page, "Advanced", false);
-	choice
+
+	/// The update settings as chosen, or `current` where nothing is.
+	fn updates(&self, current: Updates) -> Updates {
+		let channel = self.channel.get_selection().and_then(|index| CHANNELS.get(index as usize));
+		Updates {
+			channel: channel.map_or(current.channel, |(channel, _)| *channel),
+			check_on_startup: self.check_on_startup.get_value(),
+		}
+	}
 }
 
 fn fill(list: CheckListBox, views: &[(View, bool)]) {

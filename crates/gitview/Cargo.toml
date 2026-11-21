@@ -19,6 +19,7 @@ logkeeper = "0.1.0"
 minijinja = { version = "3.1.0", default-features = false, features = ["macros"] }
 quiet-list = "0.1.1"
 serde = { version = "1.0.229", features = ["derive"] }
+ship-shape = "0.6.1"
 toml = "1.2.0"
 tracing = "0.1.44"
 wx-utils = { version = "0.5.2", features = ["global-hotkeys", "shortcuts", "tasks"] }

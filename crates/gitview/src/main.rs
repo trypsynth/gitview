@@ -19,7 +19,7 @@ fn main() {
 	let _log = Logkeeper::new(config::folder(), "gitview")
 		.with_crates(["gitview", "gitview_core"])
 		.init(config::load().log_level());
-	tracing::info!(version = env!("CARGO_PKG_VERSION"), "starting");
+	tracing::info!(version = env!("CARGO_PKG_VERSION"), commit = env!("GITVIEW_SHORT_HASH"), "starting");
 	let door = match door {
 		Ok(doorbell::Ring::First(door)) => Some(door),
 		Ok(doorbell::Ring::Delivered) => None,

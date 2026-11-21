@@ -34,6 +34,7 @@ use super::{
 	live,
 	sectioned::SectionedLists,
 	text::{self, repository_label},
+	update,
 	view::{self, View},
 	visibility::Visibility,
 };
@@ -46,6 +47,7 @@ const ID_SETTINGS: i32 = ID_HIGHEST + 5;
 const ID_SHORTCUTS: i32 = ID_HIGHEST + 6;
 const ID_GO_TO_REPOSITORY: i32 = ID_HIGHEST + 7;
 const ID_GO_TO_USER: i32 = ID_HIGHEST + 8;
+const ID_CHECK_FOR_UPDATES: i32 = ID_HIGHEST + 9;
 const ID_FILTER_FIRST: i32 = ID_HIGHEST + 10;
 const ACTIONS_MENU: usize = 1;
 const FILTER_MENU: usize = 2;
@@ -55,6 +57,8 @@ const WINDOW_SIZE: Size = Size { width: 800, height: 600 };
 const POLL_INTERVAL_MS: i32 = 60_000;
 /// How long a close or reopen is laid over search results, which usually catch up in seconds.
 const SEARCH_CATCH_UP: Duration = Duration::from_secs(120);
+/// How long the window stays up to say an update is installing, before quitting so it can.
+const UPDATE_ANNOUNCE_WAIT: Duration = Duration::from_secs(2);
 /// How many dialogs Exit closes before giving up on closing them one by one.
 #[cfg(not(target_os = "macos"))]
 const EXIT_TRIES: u32 = 20;
@@ -312,6 +316,7 @@ impl MainWindow {
 		window.update_filter_menu();
 		window.update_actions_menu();
 		frame.show(true);
+		update::come_forward_after_update(&frame);
 		window.sections.focus_sections();
 		OPEN_WINDOW.set(Some(window.clone()));
 		window.register_hotkeys(&window.shortcuts.borrow());
@@ -325,12 +330,39 @@ impl MainWindow {
 				});
 			});
 		}
+		// Not in a debug build, which is never one that's published, so its commit is usually newer
+		// than the development build's and every start would offer an update.
+		if config.updates.check_on_startup && !cfg!(debug_assertions) {
+			window.check_for_updates(true);
+		}
 		spawn_for(&frame, async move {
 			match background_blocking(token::load).await {
 				Some(token) => window.connect(token),
 				None => window.sign_in(),
 			}
 		});
+	}
+
+	/// Looks for a newer Gitview. An automatic check only speaks up when there's one.
+	fn check_for_updates(&self, automatic: bool) {
+		// The updater runs this from its own thread's point of view, so it reaches the window the
+		// way a second copy of Gitview does.
+		update::check(&self.frame, automatic, || post_to_ui(|| with_open_window(Self::restart_for_update)));
+	}
+
+	/// Quits so an update that's ready can install, saying so first. The updater starts Gitview
+	/// again once it has.
+	fn restart_for_update(&self) {
+		tracing::info!("installing an update, so restarting");
+		self.announce("Installing the update. Gitview will restart.");
+		// The announcement is spoken on a later turn of the event loop, so the window stays up long
+		// enough to say it.
+		let window = self.clone();
+		spawn_local(async move {
+			sleep(UPDATE_ANNOUNCE_WAIT).await;
+			window.exit();
+		})
+		.detach();
 	}
 
 	fn bind_events(&self) {
@@ -356,6 +388,7 @@ impl MainWindow {
 			ID_SETTINGS => window.open_settings(),
 			ID_SHORTCUTS => window.edit_shortcuts(),
 			ID_SIGN_OUT => window.sign_out(),
+			ID_CHECK_FOR_UPDATES => window.check_for_updates(false),
 			ID_EXIT => window.frame.close(false),
 			id if (ID_FILTER_FIRST..ID_FILTER_FIRST + 3).contains(&id) => window.set_filter(id - ID_FILTER_FIRST),
 			// The context menu's choices arrive here too, passed up from the list.
@@ -487,7 +520,7 @@ impl MainWindow {
 			return;
 		};
 		let shortcuts = self.shortcuts.borrow();
-		for (id, command, label, _) in FILE_ITEMS {
+		for (id, command, label, _) in FILE_ITEMS.into_iter().chain(HELP_ITEMS) {
 			set_menu_item_label(&menu_bar, id, label, &command.accelerator(&shortcuts));
 		}
 	}
@@ -579,9 +612,10 @@ impl MainWindow {
 			views: self.state.borrow().arrangement.clone(),
 			lists: self.state.borrow().lists,
 			templates: config.templates.clone(),
+			updates: config.updates,
 			log_level: config.log_level(),
 		};
-		let Some(dialogs::Settings { views: arrangement, lists, templates, log_level }) =
+		let Some(dialogs::Settings { views: arrangement, lists, templates, updates, log_level }) =
 			dialogs::show_settings_dialog(&self.frame, &current, &config::folder())
 		else {
 			return;
@@ -594,6 +628,10 @@ impl MainWindow {
 		config.views = views_setting(&arrangement);
 		config.lists = lists;
 		config.templates = templates.clone();
+		if updates != config.updates {
+			tracing::info!(channel = ?updates.channel, check_on_startup = updates.check_on_startup, "update settings changed");
+			config.updates = updates;
+		}
 		if arrangement != current.views {
 			tracing::info!(order = ?config.views.order, hidden = ?config.views.hidden, "views changed");
 		}
@@ -1352,6 +1390,10 @@ const FILE_ITEMS: [(i32, Command, &str, &str); 7] = [
 	(ID_SIGN_OUT, Command::SignOut, "Sign O&ut", "Forget your GitHub sign-in"),
 ];
 
+/// The Help menu's items, in order.
+const HELP_ITEMS: [(i32, Command, &str, &str); 1] =
+	[(ID_CHECK_FOR_UPDATES, Command::CheckForUpdates, "Check for &Updates...", "See whether a newer Gitview is out")];
+
 /// Builds the menu bar with the keys `shortcuts` binds. The Actions and Filter menus start
 /// empty, since what they hold depends on the selected item and view.
 fn build_menu_bar(frame: &Frame, shortcuts: &config::Shortcuts) {
@@ -1364,11 +1406,16 @@ fn build_menu_bar(frame: &Frame, shortcuts: &config::Shortcuts) {
 		}
 	}
 	file_menu.append(ID_EXIT, "E&xit", "Close Gitview", ItemKind::Normal);
+	let help_menu = Menu::builder().build();
+	for (id, command, label, help) in HELP_ITEMS {
+		help_menu.append(id, &menu_label(label, &command.accelerator(shortcuts)), help, ItemKind::Normal);
+	}
 	frame.set_menu_bar(
 		MenuBar::builder()
 			.append(file_menu, "&File")
 			.append(Menu::builder().build(), "&Actions")
 			.append(Menu::builder().build(), "F&ilter")
+			.append(help_menu, "&Help")
 			.build(),
 	);
 }

@@ -22,11 +22,12 @@ pub enum Command {
 	CustomizeShortcuts,
 	EditProfile,
 	SignOut,
+	CheckForUpdates,
 }
 
 impl Command {
 	/// Every command, in the order Customize Keyboard Shortcuts lists them.
-	pub const ALL: [Self; 24] = [
+	pub const ALL: [Self; 25] = [
 		Self::Item(Action::Open),
 		Self::Item(Action::Comment),
 		Self::Item(Action::CloseCompleted),
@@ -51,6 +52,7 @@ impl Command {
 		Self::CustomizeShortcuts,
 		Self::EditProfile,
 		Self::SignOut,
+		Self::CheckForUpdates,
 	];
 
 	/// What the settings file calls it.
@@ -82,6 +84,7 @@ impl Command {
 			Self::CustomizeShortcuts => "customize_shortcuts",
 			Self::EditProfile => "edit_profile",
 			Self::SignOut => "sign_out",
+			Self::CheckForUpdates => "check_for_updates",
 		}
 	}
 
@@ -114,6 +117,7 @@ impl Command {
 			Self::CustomizeShortcuts => "Customize keyboard shortcuts",
 			Self::EditProfile => "Edit profile",
 			Self::SignOut => "Sign out",
+			Self::CheckForUpdates => "Check for updates",
 		}
 	}
 

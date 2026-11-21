@@ -26,6 +26,39 @@ pub struct Config {
 	pub lists: Lists,
 	/// The row templates the user has changed.
 	pub templates: Templates,
+	pub updates: Updates,
+}
+
+/// Where updates come from, and whether Gitview looks for one when it starts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Updates {
+	pub channel: Channel,
+	pub check_on_startup: bool,
+}
+
+impl Default for Updates {
+	fn default() -> Self {
+		Self { channel: Channel::for_this_build(), check_on_startup: true }
+	}
+}
+
+/// Which builds the updater offers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Channel {
+	/// Tagged releases, such as 0.1.0.
+	Stable,
+	/// The development build made from every push.
+	Dev,
+}
+
+impl Channel {
+	/// A development build follows development builds, and a release follows releases, until the
+	/// user chooses otherwise.
+	pub fn for_this_build() -> Self {
+		if env!("GITVIEW_IS_DEV") == "1" { Self::Dev } else { Self::Stable }
+	}
 }
 
 /// Which way lists run, as Fedra's Display options have it. A thread always reads oldest first,
@@ -95,6 +128,12 @@ pub fn folder() -> PathBuf {
 
 /// Where this copy of Gitview keeps its settings. Linux keeps the lowercase folder name it has
 /// always used there.
+/// Whether this copy was installed or keeps its settings beside it, which says how an update
+/// replaces it.
+pub fn install_kind() -> homeport::InstallKind {
+	home().kind()
+}
+
 fn home() -> Homeport {
 	let name = if cfg!(any(target_os = "windows", target_os = "macos")) { "Gitview" } else { "gitview" };
 	Homeport::new(name).with_config_override(CONFIG_DIR_VARIABLE)

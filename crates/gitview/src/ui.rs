@@ -10,6 +10,7 @@ mod sectioned;
 mod text;
 #[cfg(not(target_os = "macos"))]
 mod tray;
+mod update;
 mod view;
 mod visibility;
 mod web;
