@@ -77,9 +77,12 @@ jobs:
         if (-not (Test-Path target/release/wxwidgets_cmake_build/libs/webview/packages)) {
           cargo clean --release -p wxdragon-sys
         }
-    - name: Build and package
+    # Without the minisign secrets the builds still go out, unsigned, but the updater won't install them.
+    - name: Build, package and sign
       env:
         WXWIDGETS_DIR: ${{ github.workspace }}/wxWidgets
+        MINISIGN_KEY: ${{ secrets.MINISIGN_KEY }}
+        MINISIGN_PASSWORD: ${{ secrets.MINISIGN_PASSWORD }}
       run: cargo xtask release
     - name: Upload artifacts
       uses: actions/upload-artifact@v7
@@ -87,7 +90,9 @@ jobs:
         name: gitview-build-${{ matrix.arch }}
         path: |
           target/release/gitview-${{ matrix.arch }}.zip
+          target/release/gitview-${{ matrix.arch }}.zip.minisig
           target/release/gitview_setup-${{ matrix.arch }}.exe
+          target/release/gitview_setup-${{ matrix.arch }}.exe.minisig
         if-no-files-found: error
         retention-days: 30
   publish:
@@ -116,17 +121,15 @@ jobs:
         # The latest tag is this release's own, so it never counts as the last version.
         TAG=$(git describe --tags --abbrev=0 --exclude latest 2>/dev/null || echo "")
         echo "tag=$TAG" >> $GITHUB_OUTPUT
-    # Before any version is tagged, the notes list the newest commits rather than every one.
+    # The updater's dev channel reads these: one commit a line, newest first, as "- " and a seven-character hash, then
+    # the message. Before any version is tagged, they list the newest commits rather than every one.
     - name: Generate release notes
       id: release_notes
       run: |
         PREV_TAG="${{ steps.get_tag.outputs.tag }}"
-        if [ -z "$PREV_TAG" ]; then
-          COMMITS=$(git log -30 --pretty=format:"- %h: %s" HEAD)
-        else
-          COMMITS=$(git log --pretty=format:"- %h: %s" "$PREV_TAG"..HEAD)
-        fi
-        COMMITS="${COMMITS//'%'/'%25'}"
+        if [ -z "$PREV_TAG" ]; then RANGE="-30 HEAD"; else RANGE="$PREV_TAG..HEAD"; fi
+        # Git lengthens %h past seven characters when it needs to, so the full hash is cut down instead.
+        COMMITS=$(git log $RANGE --pretty=format:"- %H %s" | sed -E "s/^- ([0-9a-f]{7})[0-9a-f]+ /- \1 /")
         echo "commits<<EOF" >> $GITHUB_OUTPUT
         echo "$COMMITS" >> $GITHUB_OUTPUT
         echo "EOF" >> $GITHUB_OUTPUT
