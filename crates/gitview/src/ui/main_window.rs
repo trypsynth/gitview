@@ -13,9 +13,12 @@ use gitview_core::{
 use key_chord::KeyChord;
 use quiet_list::{QuietList, Select};
 use serde::de::DeserializeOwned;
+#[cfg(not(target_os = "macos"))]
+use wx_utils::tray::Tray;
 use wx_utils::{
 	menu_label, post_to_ui, prompt_text, set_menu_item_label, show_error,
 	tasks::{Queue, background_blocking, sleep, spawn_for, spawn_local},
+	tray::Visibility,
 };
 use wxdragon::{
 	clipboard::Clipboard,
@@ -24,8 +27,6 @@ use wxdragon::{
 	utils::{BrowserLaunchFlags, launch_default_browser},
 };
 
-#[cfg(not(target_os = "macos"))]
-use super::tray::Tray;
 use super::{
 	actions::{self, Action, Marks, Selected},
 	dialogs,
@@ -36,7 +37,6 @@ use super::{
 	text::{self, repository_label},
 	update,
 	view::{self, Sort, View},
-	visibility::Visibility,
 };
 use crate::{config, template, token, ui::notice};
 
@@ -302,7 +302,12 @@ impl MainWindow {
 		#[cfg(not(target_os = "macos"))]
 		let tray = {
 			let (toggling, bringing) = (Rc::clone(&visibility), Rc::clone(&visibility));
-			Rc::new(Tray::install(move || toggling.show_or_hide(), move || bringing.come_forward()))
+			Rc::new(
+				Tray::builder("Gitview")
+					.on_click(move || bringing.come_forward())
+					.on_show_hide(move || toggling.show_or_hide())
+					.build(&frame),
+			)
 		};
 		let window = Self {
 			frame,
@@ -374,11 +379,9 @@ impl MainWindow {
 
 	fn bind_events(&self) {
 		let window = self.clone();
+		// The tray icon takes itself out as the window closes.
 		self.frame.on_close(move |event| {
 			window.hotkeys.abandon();
-			// The tray icon would otherwise keep Gitview running once the window is gone.
-			#[cfg(not(target_os = "macos"))]
-			window.tray.remove();
 			event.skip(true);
 		});
 		#[cfg(not(target_os = "macos"))]
