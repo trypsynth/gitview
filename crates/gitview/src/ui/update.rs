@@ -11,9 +11,9 @@ use wxdragon::prelude::*;
 use crate::config::{self, Channel};
 
 const REPOSITORY: &str = "trypsynth/gitview";
-/// The minisign key Gitview's builds are signed with, which is Fedra's too. An update whose
-/// signature it doesn't verify is never installed.
-const PUBLIC_KEY: &str = "RWTlkclKA9G3Jhv3wkicYywPfi5XqULERn6LrK7aIv9nYQUPbhQaxSqZ";
+/// The minisign key Gitview's builds are signed with. An update whose signature it doesn't verify
+/// is never installed.
+const PUBLIC_KEY: &str = "RWSPPY7CuiOcORz9tJEWN3J9/Q1pbDZ03F01ozk+tc4Thfdiv5EQpa1p";
 
 /// Looks for an update on the channel the settings choose. An automatic check only speaks up
 /// when there's an update; one the user asked for also says when Gitview is up to date, or that
