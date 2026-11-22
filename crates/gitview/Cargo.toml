@@ -22,7 +22,7 @@ serde = { version = "1.0.229", features = ["derive"] }
 ship-shape = "0.6.1"
 toml = "1.2.0"
 tracing = "0.1.44"
-wx-utils = { version = "0.5.2", features = ["global-hotkeys", "shortcuts", "tasks", "tray"] }
+wx-utils = { version = "0.5.3", features = ["global-hotkeys", "shortcuts", "tasks", "tray"] }
 wxdragon = { version = "0.9.25", features = ["webview"] }
 
 [build-dependencies]

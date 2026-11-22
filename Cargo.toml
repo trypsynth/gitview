@@ -22,7 +22,3 @@ opt-level = "z"
 lto = true
 panic = "abort"
 codegen-units = 1
-
-# Until a wx-utils release has its tasks and tray.
-[patch.crates-io]
-wx-utils = { git = "https://github.com/accessware/wx-utils", rev = "b24a79f" }
