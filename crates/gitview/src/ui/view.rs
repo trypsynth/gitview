@@ -1,5 +1,9 @@
 //! The lists the main window can show, and how they are named in the config file.
 
+use std::collections::BTreeMap;
+
+use gitview_core::models::{RepositoryOrder, SearchOrder, StarredOrder};
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum View {
 	Notifications,
@@ -46,6 +50,31 @@ impl View {
 		}
 	}
 
+	/// The orders this view can be sorted in, in menu order, the first being its default. Some
+	/// views have only the one GitHub gives them in.
+	pub const fn sorts(self) -> &'static [Sort] {
+		match self {
+			Self::Repositories => &[Sort::Updated, Sort::Pushed, Sort::Created, Sort::Name],
+			Self::Starred => &[Sort::Starred, Sort::Updated],
+			Self::Assigned | Self::ReviewRequested => &[Sort::Updated, Sort::Opened, Sort::Comments],
+			Self::Notifications | Self::Watched => &[],
+		}
+	}
+
+	/// The order this view is sorted in until the user picks another, which is how GitHub gives it.
+	pub fn default_sort(self) -> Sort {
+		self.sorts().first().copied().unwrap_or(Sort::Updated)
+	}
+
+	/// The order the settings file says this view is sorted in, or its default when it names none
+	/// the view offers.
+	pub fn saved_sort(self, sorts: &BTreeMap<String, String>) -> Sort {
+		sorts
+			.get(self.id())
+			.and_then(|id| self.sorts().iter().copied().find(|sort| sort.id() == id))
+			.unwrap_or_else(|| self.default_sort())
+	}
+
 	pub const fn empty_message(self) -> &'static str {
 		match self {
 			Self::Notifications => "No notifications.",
@@ -89,7 +118,21 @@ pub fn arrange(order: &[String], hidden: &[String]) -> Vec<(View, bool)> {
 
 #[cfg(test)]
 mod tests {
-	use super::{View, arrange};
+	use std::collections::BTreeMap;
+
+	use super::{Sort, View, arrange};
+
+	#[test]
+	fn a_saved_sort_is_used_only_when_the_view_offers_it() {
+		let saved = BTreeMap::from([
+			("starred".to_owned(), "updated".to_owned()),
+			("repositories".to_owned(), "comments".to_owned()),
+		]);
+		assert_eq!(View::Starred.saved_sort(&saved), Sort::Updated);
+		assert_eq!(View::Repositories.saved_sort(&saved), Sort::Updated);
+		assert_eq!(View::Assigned.saved_sort(&saved), Sort::Updated);
+		assert_eq!(View::Starred.saved_sort(&BTreeMap::new()), Sort::Starred);
+	}
 
 	fn ids(ids: &[&str]) -> Vec<String> {
 		ids.iter().map(|id| (*id).to_owned()).collect()
@@ -105,5 +148,69 @@ mod tests {
 		let arranged = arrange(&ids(&["starred", "gone", "notifications", "starred"]), &ids(&["notifications"]));
 		assert_eq!(arranged[..3], [(View::Starred, true), (View::Notifications, false), (View::Repositories, true)]);
 		assert_eq!(arranged.len(), View::COUNT);
+	}
+}
+
+/// An order a view can be sorted in. Which ones a view offers is up to [`View::sorts`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Sort {
+	Updated,
+	Pushed,
+	Created,
+	Name,
+	Starred,
+	Opened,
+	Comments,
+}
+
+impl Sort {
+	/// What the settings file calls it.
+	pub const fn id(self) -> &'static str {
+		match self {
+			Self::Updated => "updated",
+			Self::Pushed => "pushed",
+			Self::Created => "created",
+			Self::Name => "name",
+			Self::Starred => "starred",
+			Self::Opened => "opened",
+			Self::Comments => "comments",
+		}
+	}
+
+	/// What the Sort menu calls it.
+	pub const fn label(self) -> &'static str {
+		match self {
+			Self::Updated => "Last &updated",
+			Self::Pushed => "Last &pushed",
+			Self::Created => "Date &created",
+			Self::Name => "&Name",
+			Self::Starred => "Date &starred",
+			Self::Opened => "Date &opened",
+			Self::Comments => "Most &commented",
+		}
+	}
+
+	pub const fn repository_order(self) -> RepositoryOrder {
+		match self {
+			Self::Pushed => RepositoryOrder::Pushed,
+			Self::Created => RepositoryOrder::Created,
+			Self::Name => RepositoryOrder::Name,
+			_ => RepositoryOrder::Updated,
+		}
+	}
+
+	pub const fn starred_order(self) -> StarredOrder {
+		match self {
+			Self::Updated => StarredOrder::Updated,
+			_ => StarredOrder::Starred,
+		}
+	}
+
+	pub const fn search_order(self) -> SearchOrder {
+		match self {
+			Self::Opened => SearchOrder::Created,
+			Self::Comments => SearchOrder::Comments,
+			_ => SearchOrder::Updated,
+		}
 	}
 }

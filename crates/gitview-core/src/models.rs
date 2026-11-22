@@ -190,6 +190,69 @@ pub enum CloseReason {
 	Duplicate(u64),
 }
 
+/// The orders GitHub can give the signed-in user's repositories in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RepositoryOrder {
+	/// Most recently updated first.
+	Updated,
+	/// Most recently pushed to first.
+	Pushed,
+	/// Newest first.
+	Created,
+	/// By owner and name, A to Z.
+	Name,
+}
+
+impl RepositoryOrder {
+	pub(crate) const fn parameters(self) -> &'static str {
+		match self {
+			Self::Updated => "sort=updated&direction=desc",
+			Self::Pushed => "sort=pushed&direction=desc",
+			Self::Created => "sort=created&direction=desc",
+			Self::Name => "sort=full_name&direction=asc",
+		}
+	}
+}
+
+/// The orders GitHub can give starred repositories in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StarredOrder {
+	/// Most recently starred first.
+	Starred,
+	/// Most recently updated first.
+	Updated,
+}
+
+impl StarredOrder {
+	pub(crate) const fn parameters(self) -> &'static str {
+		match self {
+			Self::Starred => "sort=created&direction=desc",
+			Self::Updated => "sort=updated&direction=desc",
+		}
+	}
+}
+
+/// The orders GitHub's issue search can give results in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchOrder {
+	/// Most recently updated first.
+	Updated,
+	/// Most recently opened first.
+	Created,
+	/// Most comments first.
+	Comments,
+}
+
+impl SearchOrder {
+	pub(crate) const fn parameters(self) -> &'static str {
+		match self {
+			Self::Updated => "sort=updated&order=desc",
+			Self::Created => "sort=created&order=desc",
+			Self::Comments => "sort=comments&order=desc",
+		}
+	}
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IssueState {
 	Open,

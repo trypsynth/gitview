@@ -35,7 +35,7 @@ use super::{
 	sectioned::SectionedLists,
 	text::{self, repository_label},
 	update,
-	view::{self, View},
+	view::{self, Sort, View},
 	visibility::Visibility,
 };
 use crate::{config, template, token, ui::notice};
@@ -49,8 +49,10 @@ const ID_GO_TO_REPOSITORY: i32 = ID_HIGHEST + 7;
 const ID_GO_TO_USER: i32 = ID_HIGHEST + 8;
 const ID_CHECK_FOR_UPDATES: i32 = ID_HIGHEST + 9;
 const ID_FILTER_FIRST: i32 = ID_HIGHEST + 10;
+const ID_SORT_FIRST: i32 = ID_HIGHEST + 20;
 const ACTIONS_MENU: usize = 1;
 const FILTER_MENU: usize = 2;
+const SORT_MENU: usize = 3;
 const WINDOW_SIZE: Size = Size { width: 800, height: 600 };
 /// How often the view on screen is fetched again. GitHub asks clients not to poll the
 /// notifications endpoint more than once a minute.
@@ -178,6 +180,8 @@ struct State {
 	lists: config::Lists,
 	unread_only: bool,
 	issue_filter: IssueState,
+	/// The order each view is sorted in.
+	sorts: [Sort; View::COUNT],
 	/// Set while the sign-in dialog is up, so the five views in flight cannot each raise
 	/// one of their own when the token turns out to be dead.
 	signing_in: bool,
@@ -228,6 +232,7 @@ impl Default for State {
 			lists: config::Lists::default(),
 			unread_only: true,
 			issue_filter: IssueState::Open,
+			sorts: View::ALL.map(View::default_sort),
 			signing_in: false,
 			issue_changes: Vec::new(),
 			announcement: None,
@@ -288,7 +293,8 @@ impl MainWindow {
 		// Made after the lists, so no screen reader takes it for one's label.
 		let live_region = live::live_region(&panel);
 		panel.set_sizer(sections.sizer(2), true);
-		let state = State { arrangement, view: first, lists: config.lists, ..State::default() };
+		let sorts = View::ALL.map(|view| view.saved_sort(&config.sorts));
+		let state = State { arrangement, view: first, lists: config.lists, sorts, ..State::default() };
 		for (_, list) in sections.lists() {
 			list.set_start_at_end(config.lists.oldest_first);
 		}
@@ -314,6 +320,7 @@ impl MainWindow {
 		window.fill_views();
 		window.bind_events();
 		window.update_filter_menu();
+		window.update_sort_menu();
 		window.update_actions_menu();
 		frame.show(true);
 		update::come_forward_after_update(&frame);
@@ -391,6 +398,7 @@ impl MainWindow {
 			ID_CHECK_FOR_UPDATES => window.check_for_updates(false),
 			ID_EXIT => window.frame.close(false),
 			id if (ID_FILTER_FIRST..ID_FILTER_FIRST + 3).contains(&id) => window.set_filter(id - ID_FILTER_FIRST),
+			id if (ID_SORT_FIRST..ID_SORT_FIRST + 4).contains(&id) => window.set_sort(id - ID_SORT_FIRST),
 			// The context menu's choices arrive here too, passed up from the list.
 			id => match Action::from_id(id) {
 				Some(action) => window.perform(action),
@@ -717,6 +725,7 @@ impl MainWindow {
 	fn show_view(&self, view: View) {
 		self.state.borrow_mut().view = view;
 		self.update_filter_menu();
+		self.update_sort_menu();
 		self.update_actions_menu();
 		// Startup loads every view, so this only happens when that fetch is still in flight or
 		// failed.
@@ -769,6 +778,61 @@ impl MainWindow {
 		self.fetch(view);
 	}
 
+	/// Sorts the selected view in the `index`th order it offers, remembers that for next time, and
+	/// fetches it again in that order, since GitHub does the sorting.
+	fn set_sort(&self, index: i32) {
+		let view = self.state.borrow().view;
+		let Some(&sort) = usize::try_from(index).ok().and_then(|index| view.sorts().get(index)) else {
+			return;
+		};
+		{
+			let mut state = self.state.borrow_mut();
+			if state.sorts[view.index()] == sort {
+				return;
+			}
+			state.sorts[view.index()] = sort;
+			// What is held is in the old order, so it cannot stand in while the new fetch runs.
+			state.loaded[view.index()] = None;
+		}
+		tracing::info!(view = view.id(), sort = sort.id(), "sort changed");
+		let mut config = config::load();
+		config.sorts.insert(view.id().to_owned(), sort.id().to_owned());
+		if let Err(error) = config::save(&config) {
+			notice::warning(
+				&self.frame,
+				format!("Gitview could not save the order, so it will only last until it closes. {error}"),
+				"Order Not Saved",
+			);
+		}
+		self.clear(view);
+		self.update_actions_menu();
+		self.fetch(view);
+	}
+
+	/// Rebuilds the Sort menu for the selected view, since the orders differ per view.
+	fn update_sort_menu(&self) {
+		let Some(menu_bar) = self.frame.get_menu_bar() else {
+			return;
+		};
+		let state = self.state.borrow();
+		let sorts = state.view.sorts();
+		let menu = Menu::builder().build();
+		if sorts.is_empty() {
+			menu.append(ID_SORT_FIRST, "No other orders for this view", "", ItemKind::Normal);
+			menu.enable_item(ID_SORT_FIRST, false);
+		} else {
+			let current = state.sorts[state.view.index()];
+			for (index, sort) in sorts.iter().enumerate() {
+				let id = ID_SORT_FIRST + i32::try_from(index).unwrap_or_default();
+				menu.append(id, sort.label(), "Sort the view this way", ItemKind::Radio);
+				if *sort == current {
+					menu.check_item(id, true);
+				}
+			}
+		}
+		menu_bar.replace(SORT_MENU, menu, "&Sort");
+	}
+
 	/// Rebuilds the Filter menu for the selected view, since the filters differ per view.
 	fn update_filter_menu(&self) {
 		let Some(menu_bar) = self.frame.get_menu_bar() else {
@@ -807,10 +871,10 @@ impl MainWindow {
 	/// Asks GitHub for `view` again, as many pages as it has loaded. The list keeps what it has
 	/// until the answer arrives.
 	fn fetch(&self, view: View) {
-		let (Some(client), unread_only, issue_filter, pages) = ({
+		let (Some(client), unread_only, issue_filter, sort, pages) = ({
 			let state = self.state.borrow();
 			let pages = state.loaded[view.index()].as_ref().map_or(1, |loaded| loaded.pages);
-			(state.client.clone(), state.unread_only, state.issue_filter, pages)
+			(state.client.clone(), state.unread_only, state.issue_filter, state.sorts[view.index()], pages)
 		}) else {
 			return;
 		};
@@ -824,21 +888,37 @@ impl MainWindow {
 					Items::Notifications,
 					More::Notifications,
 				),
-				View::Repositories => {
-					Fetched::load(client, client.repositories(), pages, Items::Repositories, More::Repositories)
-				}
-				View::Starred => {
-					Fetched::load(client, client.starred(), pages, Items::Repositories, More::Repositories)
-				}
+				View::Repositories => Fetched::load(
+					client,
+					client.repositories(sort.repository_order()),
+					pages,
+					Items::Repositories,
+					More::Repositories,
+				),
+				View::Starred => Fetched::load(
+					client,
+					client.starred(sort.starred_order()),
+					pages,
+					Items::Repositories,
+					More::Repositories,
+				),
 				View::Watched => {
 					Fetched::load(client, client.watched(), pages, Items::Repositories, More::Repositories)
 				}
-				View::Assigned => {
-					Fetched::load(client, client.assigned(issue_filter), pages, Items::Issues, More::Issues)
-				}
-				View::ReviewRequested => {
-					Fetched::load(client, client.review_requests(issue_filter), pages, Items::Issues, More::Issues)
-				}
+				View::Assigned => Fetched::load(
+					client,
+					client.assigned(issue_filter, sort.search_order()),
+					pages,
+					Items::Issues,
+					More::Issues,
+				),
+				View::ReviewRequested => Fetched::load(
+					client,
+					client.review_requests(issue_filter, sort.search_order()),
+					pages,
+					Items::Issues,
+					More::Issues,
+				),
 			}
 		});
 		let window = self.clone();
@@ -1415,6 +1495,7 @@ fn build_menu_bar(frame: &Frame, shortcuts: &config::Shortcuts) {
 			.append(file_menu, "&File")
 			.append(Menu::builder().build(), "&Actions")
 			.append(Menu::builder().build(), "F&ilter")
+			.append(Menu::builder().build(), "&Sort")
 			.append(help_menu, "&Help")
 			.build(),
 	);

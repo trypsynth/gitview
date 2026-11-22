@@ -27,6 +27,8 @@ pub struct Config {
 	/// The row templates the user has changed.
 	pub templates: Templates,
 	pub updates: Updates,
+	/// The order each view is sorted in, by the view's name and the order's.
+	pub sorts: BTreeMap<String, String>,
 }
 
 /// Where updates come from, and whether Gitview looks for one when it starts.

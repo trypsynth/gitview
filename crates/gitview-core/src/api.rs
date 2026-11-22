@@ -7,7 +7,7 @@ use crate::{
 	Error,
 	models::{
 		CloseReason, Comment, Commit, CommitDetails, Email, Issue, IssueState, Notification, Profile, ProfileUpdate,
-		Repository, SocialAccount, SubjectDetails, User, UserProfile,
+		Repository, RepositoryOrder, SearchOrder, SocialAccount, StarredOrder, SubjectDetails, User, UserProfile,
 	},
 	page::{At, Connection, Cursor, Kind, Page, link},
 };
@@ -237,14 +237,14 @@ impl Client {
 		self.get(&format!("/repos/{repo}"))
 	}
 
-	/// The signed-in user's repositories, most recently updated first.
-	pub fn repositories(&self) -> Result<Page<Repository>, Error> {
-		self.fetch_page("/user/repos?sort=updated&direction=desc&per_page=100", Kind::Plain)
+	/// The signed-in user's repositories, in `order`.
+	pub fn repositories(&self, order: RepositoryOrder) -> Result<Page<Repository>, Error> {
+		self.fetch_page(&format!("/user/repos?{}&per_page=100", order.parameters()), Kind::Plain)
 	}
 
-	/// Repositories the signed-in user has starred, most recently starred first.
-	pub fn starred(&self) -> Result<Page<Repository>, Error> {
-		self.fetch_page("/user/starred?sort=created&direction=desc&per_page=100", Kind::Plain)
+	/// Repositories the signed-in user has starred, in `order`.
+	pub fn starred(&self, order: StarredOrder) -> Result<Page<Repository>, Error> {
+		self.fetch_page(&format!("/user/starred?{}&per_page=100", order.parameters()), Kind::Plain)
 	}
 
 	/// Repositories the signed-in user watches, which GitHub calls subscriptions, most recently
@@ -312,13 +312,13 @@ impl Client {
 	}
 
 	/// Issues and pull requests assigned to the signed-in user, across every repository.
-	pub fn assigned(&self, state: IssueState) -> Result<Page<Issue>, Error> {
-		self.search("assignee:@me", state)
+	pub fn assigned(&self, state: IssueState, order: SearchOrder) -> Result<Page<Issue>, Error> {
+		self.search("assignee:@me", state, order)
 	}
 
 	/// Pull requests waiting for the signed-in user's review.
-	pub fn review_requests(&self, state: IssueState) -> Result<Page<Issue>, Error> {
-		self.search("is:pr review-requested:@me", state)
+	pub fn review_requests(&self, state: IssueState, order: SearchOrder) -> Result<Page<Issue>, Error> {
+		self.search("is:pr review-requested:@me", state, order)
 	}
 
 	pub fn issue(&self, repo: &str, number: u64) -> Result<Issue, Error> {
@@ -392,11 +392,12 @@ impl Client {
 
 	// Spaces are the only character the qualifiers here need escaping for; `:`, `@` and `-`
 	// all travel through a query string as they are.
-	fn search(&self, query: &str, state: IssueState) -> Result<Page<Issue>, Error> {
+	fn search(&self, query: &str, state: IssueState, order: SearchOrder) -> Result<Page<Issue>, Error> {
 		let query = format!("{query} {}", state.as_qualifier());
 		self.fetch_page(
 			&format!(
-				"/search/issues?advanced_search=true&sort=updated&order=desc&per_page=100&q={}",
+				"/search/issues?advanced_search=true&{}&per_page=100&q={}",
+				order.parameters(),
 				query.trim().replace(' ', "+")
 			),
 			Kind::Search,
