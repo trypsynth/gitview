@@ -9,7 +9,7 @@ repository.workspace = true
 
 [dependencies]
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
-doorbell = "0.1.0"
+doorbell = "0.1.2"
 gitview-core = { path = "../gitview-core" }
 homeport = "0.1.0"
 key-chord = "0.2.2"
@@ -20,7 +20,7 @@ minijinja = { version = "3.1.0", default-features = false, features = ["macros"]
 quiet-list = "0.1.1"
 serde = { version = "1.0.229", features = ["derive"] }
 ship-shape = "0.6.1"
-toml = "1.2.0"
+toml = "1.2.2"
 tracing = "0.1.44"
 wx-utils = { version = "0.5.3", features = ["global-hotkeys", "shortcuts", "tasks", "tray"] }
 wxdragon = { version = "0.9.25", features = ["webview"] }
