@@ -23,11 +23,12 @@ pub enum Command {
 	EditProfile,
 	SignOut,
 	CheckForUpdates,
+	ViewHelp,
 }
 
 impl Command {
 	/// Every command, in the order Customize Keyboard Shortcuts lists them.
-	pub const ALL: [Self; 25] = [
+	pub const ALL: [Self; 26] = [
 		Self::Item(Action::Open),
 		Self::Item(Action::Comment),
 		Self::Item(Action::CloseCompleted),
@@ -53,6 +54,7 @@ impl Command {
 		Self::EditProfile,
 		Self::SignOut,
 		Self::CheckForUpdates,
+		Self::ViewHelp,
 	];
 
 	/// What the settings file calls it.
@@ -85,6 +87,7 @@ impl Command {
 			Self::EditProfile => "edit_profile",
 			Self::SignOut => "sign_out",
 			Self::CheckForUpdates => "check_for_updates",
+			Self::ViewHelp => "view_help",
 		}
 	}
 
@@ -118,6 +121,7 @@ impl Command {
 			Self::EditProfile => "Edit profile",
 			Self::SignOut => "Sign out",
 			Self::CheckForUpdates => "Check for updates",
+			Self::ViewHelp => "View help",
 		}
 	}
 
@@ -137,6 +141,7 @@ impl Command {
 			Self::Refresh => (false, false, "F5"),
 			Self::Settings => (true, false, ","),
 			Self::EditProfile => (true, true, "E"),
+			Self::ViewHelp => (false, false, "F1"),
 			_ => return None,
 		};
 		Some(KeyChord::new(ctrl, false, shift, key))

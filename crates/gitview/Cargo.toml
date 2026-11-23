@@ -26,7 +26,7 @@ wx-utils = { version = "0.5.3", features = ["global-hotkeys", "shortcuts", "task
 wxdragon = { version = "0.9.25", features = ["webview"] }
 
 [build-dependencies]
-shipfitter = { version = "0.2.5", features = ["windows-resources"] }
+shipfitter = { version = "0.2.5", features = ["docs", "windows-resources"] }
 
 [lints]
 workspace = true

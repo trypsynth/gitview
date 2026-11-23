@@ -151,6 +151,11 @@ pub fn folder() -> PathBuf {
 
 /// Where this copy of Gitview keeps its settings. Linux keeps the lowercase folder name it has
 /// always used there.
+/// The folder this copy of Gitview's own files are in, such as the manual.
+pub fn resource_dir() -> PathBuf {
+	home().resource_dir()
+}
+
 /// Whether this copy was installed or keeps its settings beside it, which says how an update
 /// replaces it.
 pub fn install_kind() -> homeport::InstallKind {

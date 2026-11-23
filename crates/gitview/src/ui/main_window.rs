@@ -48,6 +48,7 @@ const ID_SHORTCUTS: i32 = ID_HIGHEST + 6;
 const ID_GO_TO_REPOSITORY: i32 = ID_HIGHEST + 7;
 const ID_GO_TO_USER: i32 = ID_HIGHEST + 8;
 const ID_CHECK_FOR_UPDATES: i32 = ID_HIGHEST + 9;
+const ID_VIEW_HELP: i32 = ID_HIGHEST + 30;
 const ID_FILTER_FIRST: i32 = ID_HIGHEST + 10;
 const ID_HIDE_FORKS: i32 = ID_HIGHEST + 16;
 const ID_HIDE_ARCHIVED: i32 = ID_HIGHEST + 17;
@@ -411,6 +412,19 @@ impl MainWindow {
 		});
 	}
 
+	/// Opens the manual, which the build puts beside Gitview, in the browser.
+	fn view_help(&self) {
+		let manual = config::resource_dir().join("readme.html");
+		if !manual.exists() {
+			tracing::warn!(path = %manual.display(), "the manual is missing");
+			show_error(&self.frame, "The manual is missing. Reinstalling Gitview puts it back.", "View Help");
+			return;
+		}
+		// Said first, before the browser takes the screen reader's attention.
+		self.announce("Opening the manual.");
+		launch_default_browser(&manual.to_string_lossy(), BrowserLaunchFlags::Default);
+	}
+
 	/// Looks for a newer Gitview. An automatic check only speaks up when there's one.
 	fn check_for_updates(&self, automatic: bool) {
 		// The updater runs this from its own thread's point of view, so it reaches the window the
@@ -455,6 +469,7 @@ impl MainWindow {
 			ID_SHORTCUTS => window.edit_shortcuts(),
 			ID_SIGN_OUT => window.sign_out(),
 			ID_CHECK_FOR_UPDATES => window.check_for_updates(false),
+			ID_VIEW_HELP => window.view_help(),
 			ID_EXIT => window.frame.close(false),
 			id if (ID_FILTER_FIRST..ID_FILTER_FIRST + 4).contains(&id) => window.set_filter(id - ID_FILTER_FIRST),
 			ID_HIDE_FORKS => window.set_repository_filters(|filters| filters.hide_forks = !filters.hide_forks),
@@ -1573,8 +1588,10 @@ const FILE_ITEMS: [(i32, Command, &str, &str); 7] = [
 ];
 
 /// The Help menu's items, in order.
-const HELP_ITEMS: [(i32, Command, &str, &str); 1] =
-	[(ID_CHECK_FOR_UPDATES, Command::CheckForUpdates, "Check for &Updates...", "See whether a newer Gitview is out")];
+const HELP_ITEMS: [(i32, Command, &str, &str); 2] = [
+	(ID_CHECK_FOR_UPDATES, Command::CheckForUpdates, "Check for &Updates...", "See whether a newer Gitview is out"),
+	(ID_VIEW_HELP, Command::ViewHelp, "View &Help", "Open the user manual"),
+];
 
 /// Builds the menu bar with the keys `shortcuts` binds. The Actions and Filter menus start
 /// empty, since what they hold depends on the selected item and view.

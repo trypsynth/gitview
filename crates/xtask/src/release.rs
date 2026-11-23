@@ -44,6 +44,8 @@ fn package() -> Result<Vec<PathBuf>, Box<dyn Error>> {
 	let zip_path = target_dir.join(format!("gitview-{arch}.zip"));
 	let mut zip = Zip::create(&zip_path)?;
 	zip.file(&exe, EXE_NAME)?;
+	// The build script made the manual beside the executable.
+	zip.file(&target_dir.join("readme.html"), "readme.html")?;
 	zip.finish()?;
 	println!("Created zip: {}", zip_path.display());
 	let mut artifacts = vec![zip_path];

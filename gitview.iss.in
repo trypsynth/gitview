@@ -2,9 +2,9 @@
 	AppName=Gitview
 	AppVersion=@PROJECT_VERSION@
 	AppPublisher=Quin Gillespie
-	AppPublisherURL=https://github.com/trypsynth/gitview
-	AppSupportURL=https://github.com/trypsynth/gitview/issues
-	AppUpdatesURL=https://github.com/trypsynth/gitview/releases
+	AppPublisherURL=https://github.com/accessware/gitview
+	AppSupportURL=https://github.com/accessware/gitview/issues
+	AppUpdatesURL=https://github.com/accessware/gitview/releases
 	DefaultDirName={autopf}\Gitview
 	DisableProgramGroupPage=yes
 	DisableDirPage=yes
@@ -22,6 +22,7 @@
 
 [Files]
 	Source: "gitview.exe"; DestDir: "{app}"; Flags: ignoreversion
+	Source: "readme.html"; DestDir: "{app}"; Flags: ignoreversion
 
 [Tasks]
 	Name: "desktopicon"; Description: "Desktop Shortcut"
@@ -33,3 +34,4 @@
 
 [Run]
 	Filename: "{app}\gitview.exe"; Description: "Launch Gitview"; Flags: nowait postinstall skipifsilent
+	Filename: "{app}\readme.html"; Description: "View readme.html"; Flags: shellexec postinstall skipifsilent unchecked
