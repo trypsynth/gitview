@@ -1,0 +1,144 @@
+name: Release Gitview
+on:
+  push:
+    tags:
+      - 'v*'
+permissions:
+  contents: write
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+jobs:
+  notes:
+    name: Release notes
+    runs-on: ubuntu-latest
+    outputs:
+      body: ${{ steps.changelog.outputs.body }}
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v7
+    # Runs before the builds, so a release without a changelog fails in seconds instead of after them.
+    - name: Read this version's changelog
+      id: changelog
+      run: |
+        version="${GITHUB_REF_NAME#v}"
+        notes=$(awk -v heading="### Version $version" '$0 == heading { found = 1; next } /^### Version / { found = 0 } found' doc/readme.md | sed '/./,$!d')
+        if [ -z "$(printf '%s' "$notes" | tr -d '[:space:]')" ]; then
+          echo "::error file=doc/readme.md::No changelog for $version. Add a '### Version $version' section before tagging."
+          exit 1
+        fi
+        {
+          echo 'body<<END_OF_NOTES'
+          printf '%s\n' "$notes"
+          echo 'END_OF_NOTES'
+        } >> "$GITHUB_OUTPUT"
+  build:
+    name: Build (${{ matrix.arch }})
+    needs: notes
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            arch: x64
+          - os: windows-11-arm
+            arch: arm64
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v7
+      with:
+        fetch-depth: 0
+    - name: Setup MSVC
+      uses: ilammy/msvc-dev-cmd@v1
+      with:
+        arch: ${{ matrix.arch }}
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        toolchain: stable
+    # The x64 runner has CMake, and the MSVC step puts Visual Studio's Ninja on the PATH.
+    - name: Install CMake and Ninja
+      if: matrix.arch == 'arm64'
+      uses: lukka/get-cmake@v4.5.0
+    # wxWidgets is built by wxdragon-sys, so only its locked version decides whether a cached build still fits.
+    - name: Find the locked wxdragon-sys
+      id: wxdragon
+      shell: bash
+      run: echo "hash=$(awk '/^name = "wxdragon-sys"/{f=1} f&&/^$/{exit} f' Cargo.lock | grep -E '^(version|source|checksum) ' | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
+    # wxdragon-sys downloads the wxWidgets release it's built for into an empty WXWIDGETS_DIR, so the source only changes with it.
+    - name: Cache wxWidgets source
+      uses: actions/cache@v6
+      with:
+        path: wxWidgets
+        key: wxwidgets-src-${{ steps.wxdragon.outputs.hash }}
+    # Shared with the build workflow, so a release starts from the last build on main, and never saved from a tag.
+    - name: Cache Rust dependencies
+      uses: Swatinem/rust-cache@v2
+      with:
+        shared-key: release-windows-${{ matrix.arch }}-wx-${{ steps.wxdragon.outputs.hash }}-msvc${{ env.VCToolsVersion }}
+        save-if: false
+    # After the Rust cache, since post steps run in reverse.
+    - name: Cache wxWidgets build
+      uses: actions/cache/restore@v6
+      with:
+        path: |
+          target/release/wxwidgets_cmake_build
+          target/release/wxdragon_sys_cmake_build
+        # CMake keeps the toolset's linker path, which a runner image with a newer MSVC no longer has.
+        key: wx-cmake-release-${{ runner.os }}-${{ matrix.arch }}-${{ steps.wxdragon.outputs.hash }}-msvc${{ env.VCToolsVersion }}
+    # A hit on the Rust cache with a miss on this one would leave wxdragon-sys counted as built with its libraries gone.
+    - name: Rebuild wxdragon-sys if its CMake output is missing
+      shell: pwsh
+      run: |
+        if (-not (Test-Path target/release/wxwidgets_cmake_build/libs/webview/packages)) {
+          cargo clean --release -p wxdragon-sys
+        }
+    # A release is never published unsigned, since the updater won't install it.
+    - name: Check the signing key is set
+      shell: bash
+      env:
+        MINISIGN_KEY: ${{ secrets.MINISIGN_KEY }}
+      run: |
+        if [ -z "$MINISIGN_KEY" ]; then
+          echo "::error::MINISIGN_KEY isn't set, so this release can't be signed."
+          exit 1
+        fi
+    - name: Build, package and sign
+      env:
+        WXWIDGETS_DIR: ${{ github.workspace }}/wxWidgets
+        MINISIGN_KEY: ${{ secrets.MINISIGN_KEY }}
+        MINISIGN_PASSWORD: ${{ secrets.MINISIGN_PASSWORD }}
+      run: cargo xtask release
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v7
+      with:
+        name: gitview-release-${{ github.ref_name }}-${{ matrix.arch }}
+        path: |
+          target/release/gitview-${{ matrix.arch }}.zip
+          target/release/gitview-${{ matrix.arch }}.zip.minisig
+          target/release/gitview_setup-${{ matrix.arch }}.exe
+          target/release/gitview_setup-${{ matrix.arch }}.exe.minisig
+        if-no-files-found: error
+        retention-days: 90
+  release:
+    name: Publish release
+    needs: [notes, build]
+    runs-on: ubuntu-latest
+    steps:
+    - name: Download artifacts
+      uses: actions/download-artifact@v8
+      with:
+        pattern: gitview-release-${{ github.ref_name }}-*
+        path: dist
+        merge-multiple: true
+    - name: Create release
+      uses: softprops/action-gh-release@v3
+      with:
+        tag_name: ${{ github.ref_name }}
+        name: ${{ github.ref_name }}
+        body: ${{ needs.notes.outputs.body }}
+        files: dist/*
+        prerelease: false
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
