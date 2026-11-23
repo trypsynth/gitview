@@ -10,7 +10,7 @@ use wxdragon::prelude::*;
 
 use crate::config::{self, Channel};
 
-const REPOSITORY: &str = "trypsynth/gitview";
+const REPOSITORY: &str = "accessware/gitview";
 /// The minisign key Gitview's builds are signed with. An update whose signature it doesn't verify
 /// is never installed.
 const PUBLIC_KEY: &str = "RWSPPY7CuiOcORz9tJEWN3J9/Q1pbDZ03F01ozk+tc4Thfdiv5EQpa1p";

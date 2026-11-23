@@ -7,7 +7,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.91.1"
 license = "MIT"
-repository = "https://github.com/trypsynth/gitview"
+repository = "https://github.com/accessware/gitview"
 
 [workspace.lints.clippy]
 all = { level = "deny", priority = -1 }
