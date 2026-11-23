@@ -55,6 +55,9 @@ pub struct Feed<S, T> {
 	oldest_first: bool,
 	/// The row an item makes in a section, or `None` when the section doesn't list it.
 	row: fn(S, &T) -> Option<(String, String)>,
+	/// Goes up each time the feed [restarts](restart), so pages still on their way for what it
+	/// listed before are dropped when they arrive.
+	generation: u64,
 }
 
 /// A feed the dialog and its loading tasks share.
@@ -73,7 +76,14 @@ impl<S: FeedSection, T> Feed<S, T> {
 			.filter(|(section, _)| feeds(*section))
 			.map(|(section, list)| (section, Rc::clone(list), Vec::new()))
 			.collect();
-		Rc::new(RefCell::new(Self { lists: shown, next: None, loading: false, oldest_first: lists.oldest_first, row }))
+		Rc::new(RefCell::new(Self {
+			lists: shown,
+			next: None,
+			loading: false,
+			oldest_first: lists.oldest_first,
+			row,
+			generation: 0,
+		}))
 	}
 
 	/// Adds `items` to the sections that list them, and says which sections gained rows.
@@ -141,10 +151,18 @@ pub fn start<S: FeedSection, T: DeserializeOwned + Send + 'static>(
 	first: impl FnOnce() -> Result<Page<T>, Error> + Send + 'static,
 	failed_title: &'static str,
 ) {
-	feed.borrow_mut().loading = true;
+	let generation = {
+		let mut inner = feed.borrow_mut();
+		inner.loading = true;
+		inner.generation
+	};
 	let fetch = background_blocking(first);
 	spawn_for(&dialog, async move {
-		match fetch.await {
+		let fetched = fetch.await;
+		if feed.borrow().generation != generation {
+			return;
+		}
+		match fetched {
 			Ok(page) => {
 				let empty = {
 					let mut inner = feed.borrow_mut();
@@ -153,7 +171,10 @@ pub fn start<S: FeedSection, T: DeserializeOwned + Send + 'static>(
 					inner.empty_sections()
 				};
 				show(&feed, &Select::Start);
-				let result = read_on(&client, &feed, empty).await;
+				let result = read_on(&client, &feed, empty, generation).await;
+				if feed.borrow().generation != generation {
+					return;
+				}
 				feed.borrow_mut().loading = false;
 				show(&feed, &Select::Keep);
 				if let Err(error) = result {
@@ -172,6 +193,31 @@ pub fn start<S: FeedSection, T: DeserializeOwned + Send + 'static>(
 	});
 }
 
+/// Empties `feed` and fills it again from `first`, for when what it lists changes, such as the
+/// branch whose commits it shows. Its lists stay empty until the first page arrives.
+pub fn restart<S: FeedSection, T: DeserializeOwned + Send + 'static>(
+	dialog: Dialog,
+	client: Arc<Client>,
+	feed: Shared<S, T>,
+	first: impl FnOnce() -> Result<Page<T>, Error> + Send + 'static,
+	failed_title: &'static str,
+) {
+	let lists: Vec<_> = {
+		let mut inner = feed.borrow_mut();
+		inner.generation += 1;
+		inner.next = None;
+		inner.loading = false;
+		for (_, _, rows) in &mut inner.lists {
+			rows.clear();
+		}
+		inner.lists.iter().map(|(_, list, _)| Rc::clone(list)).collect()
+	};
+	for list in lists {
+		list.update_labelled(Vec::new(), Select::Start);
+	}
+	start(dialog, client, feed, first, failed_title);
+}
+
 /// Loads more of `feed` for `section`, whose oldest row was reached, as Fedra does at the end of
 /// a timeline. The selection stays where it is, and the new rows are there when it moves on.
 pub fn load_more<S: FeedSection, T: DeserializeOwned + Send + 'static>(
@@ -180,16 +226,20 @@ pub fn load_more<S: FeedSection, T: DeserializeOwned + Send + 'static>(
 	feed: &Shared<S, T>,
 	section: S,
 ) {
-	{
+	let generation = {
 		let mut inner = feed.borrow_mut();
 		if inner.loading || inner.next.is_none() {
 			return;
 		}
 		inner.loading = true;
-	}
+		inner.generation
+	};
 	let (client, feed) = (Arc::clone(client), Rc::clone(feed));
 	spawn_for(&dialog, async move {
-		let result = read_on(&client, &feed, vec![section]).await;
+		let result = read_on(&client, &feed, vec![section], generation).await;
+		if feed.borrow().generation != generation {
+			return;
+		}
 		feed.borrow_mut().loading = false;
 		show(&feed, &Select::Keep);
 		if let Err(error) = result {
@@ -199,12 +249,14 @@ pub fn load_more<S: FeedSection, T: DeserializeOwned + Send + 'static>(
 }
 
 /// Fetches the pages after those `feed` has while any of `wanted` has gained nothing, up to
-/// [`PAGES_PER_LOAD`], and stops at the list's end.
+/// [`PAGES_PER_LOAD`], and stops at the list's end, or once the feed has restarted since
+/// `generation`.
 #[expect(clippy::future_not_send, reason = "it runs on the UI thread, where the feeds live")]
 async fn read_on<S: FeedSection, T: DeserializeOwned + Send + 'static>(
 	client: &Arc<Client>,
 	feed: &Shared<S, T>,
 	mut wanted: Vec<S>,
+	generation: u64,
 ) -> Result<(), Error> {
 	for _ in 0..PAGES_PER_LOAD {
 		if wanted.is_empty() {
@@ -216,6 +268,9 @@ async fn read_on<S: FeedSection, T: DeserializeOwned + Send + 'static>(
 		let client = Arc::clone(client);
 		let page = background_blocking(move || client.next_page(&cursor)).await?;
 		let mut inner = feed.borrow_mut();
+		if inner.generation != generation {
+			break;
+		}
 		let gained = inner.add(&page.items);
 		inner.next = page.next;
 		wanted.retain(|section| !gained.contains(section));

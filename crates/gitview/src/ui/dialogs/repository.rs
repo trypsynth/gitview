@@ -1,10 +1,15 @@
 //! A repository's own dialog: what it holds, one list per section, from its commits to its
 //! closed pull requests.
 
-use std::{cell::Cell, fmt::Write, rc::Rc, sync::Arc};
+use std::{
+	cell::{Cell, RefCell},
+	fmt::Write,
+	rc::Rc,
+	sync::Arc,
+};
 
 use gitview_core::{
-	Client,
+	Client, Error,
 	models::{ChangedFile, Commit, CommitDetails, Issue, IssueState},
 };
 use wx_utils::{
@@ -17,7 +22,7 @@ use super::{open_issue, page::show_page};
 use crate::{
 	config,
 	ui::{
-		feed::{self, Feed, FeedSection, RowActions},
+		feed::{self, Feed, FeedSection, RowActions, Shared},
 		live, notice,
 		sectioned::SectionedLists,
 		text::{self, commit_label, count, local_time},
@@ -80,7 +85,8 @@ impl Section {
 
 /// Shows `repo` (`owner/name`), loading its commits and open issues while the dialog is up, and
 /// its closed issues the first time a section of them is chosen. A list stays empty until what
-/// it lists arrives.
+/// it lists arrives. The commits are the default branch's until another is chosen under Branch,
+/// which is shown with them.
 pub fn open_repository<P: WxWidget + WxEvtHandler + Copy + 'static>(parent: P, client: Arc<Client>, repo: String) {
 	let dialog = Dialog::builder(&parent, &repo).build();
 	let padding = dialog_padding(&dialog);
@@ -90,6 +96,8 @@ pub fn open_repository<P: WxWidget + WxEvtHandler + Copy + 'static>(parent: P, c
 		list.set_min_size(LIST_SIZE);
 		list.set_start_at_end(lists.oldest_first);
 	}
+	// Made after the lists and before Close, so it comes between them in the tab order.
+	let branches = BranchPicker::new(dialog);
 	let close_button = Button::builder(&dialog).with_id(ID_CANCEL).with_label("Close").build();
 	dialog.set_escape_id(ID_CANCEL);
 	let commits = Feed::new(
@@ -134,9 +142,10 @@ pub fn open_repository<P: WxWidget + WxEvtHandler + Copy + 'static>(parent: P, c
 		dialog,
 		Arc::clone(&client),
 		Rc::clone(&commits),
-		move || commits_client.commits(&commits_repo),
+		move || commits_client.commits(&commits_repo, None),
 		"Could Not Load Commits",
 	);
+	branches.follow(dialog, &client, &repo, &commits);
 	let (open_client, open_repo) = (Arc::clone(&client), repo.clone());
 	feed::start(
 		dialog,
@@ -148,6 +157,8 @@ pub fn open_repository<P: WxWidget + WxEvtHandler + Copy + 'static>(parent: P, c
 	// Closed issues can run to hundreds, so they wait until someone looks.
 	let closed_requested = Cell::new(false);
 	sections.on_section_changed(move |section| {
+		branches.show(section == Section::Commits);
+		dialog.layout();
 		if section.issue_state() == Some(IssueState::Closed) && !closed_requested.replace(true) {
 			let (closed_client, closed_repo) = (Arc::clone(&client), repo.clone());
 			feed::start(
@@ -161,17 +172,119 @@ pub fn open_repository<P: WxWidget + WxEvtHandler + Copy + 'static>(parent: P, c
 	});
 	let content = BoxSizer::builder(Orientation::Vertical).build();
 	content.add_sizer(&sections.sizer(3), 1, SizerFlag::Expand, 0);
-	content.add(
-		&close_button,
-		0,
-		SizerFlag::AlignRight | SizerFlag::Left | SizerFlag::Right | SizerFlag::Bottom,
-		padding,
-	);
+	let below_lists = SizerFlag::Left | SizerFlag::Right | SizerFlag::Bottom;
+	content.add_sizer(&branches.row(padding), 0, SizerFlag::Expand | below_lists, padding);
+	content.add(&close_button, 0, SizerFlag::AlignRight | below_lists, padding);
 	dialog.set_sizer_and_fit(content, true);
 	dialog.centre();
 	sections.current_list().set_focus();
 	dialog.show_modal();
 	dialog.destroy();
+}
+
+/// The Branch choice with the commits, which picks the branch they're from.
+#[derive(Clone, Copy)]
+struct BranchPicker {
+	label: StaticText,
+	choice: Choice,
+}
+
+impl BranchPicker {
+	/// Makes the controls on `dialog`, the label first so screen readers take it for the choice's
+	/// name. The choice waits, disabled, until the branches arrive.
+	fn new(dialog: Dialog) -> Self {
+		let label = StaticText::builder(&dialog).with_label("Branch").build();
+		let choice = Choice::builder(&dialog).with_choices(vec!["Loading branches".to_owned()]).build();
+		choice.set_selection(0);
+		choice.enable(false);
+		Self { label, choice }
+	}
+
+	fn show(self, shown: bool) {
+		self.label.show(shown);
+		self.choice.show(shown);
+	}
+
+	/// The label beside the choice, for the dialog's sizer.
+	fn row(self, padding: i32) -> BoxSizer {
+		let row = BoxSizer::builder(Orientation::Horizontal).build();
+		row.add(&self.label, 0, SizerFlag::AlignCenterVertical | SizerFlag::Right, padding);
+		row.add(&self.choice, 1, SizerFlag::empty(), 0);
+		row
+	}
+
+	/// Lists `repo`'s branches once they arrive, and fills `commits` again from whichever is
+	/// chosen. The commits start out as the default branch's.
+	fn follow(self, dialog: Dialog, client: &Arc<Client>, repo: &str, commits: &Shared<Section, Commit>) {
+		// The branch the commits are from, once the branches have arrived to say which is the default.
+		let branch = Rc::new(RefCell::new(None));
+		load_branches(dialog, Arc::clone(client), repo.to_owned(), self.choice, Rc::clone(&branch));
+		let (client, repo, commits) = (Arc::clone(client), repo.to_owned(), Rc::downgrade(commits));
+		self.choice.on_selection_changed(move |event| {
+			let (Some(name), Some(commits)) = (event.get_string(), commits.upgrade()) else {
+				return;
+			};
+			if branch.borrow().as_ref().is_none_or(|shown| *shown == name) {
+				return;
+			}
+			tracing::debug!(branch = name, "showing another branch's commits");
+			*branch.borrow_mut() = Some(name.clone());
+			let (commits_client, commits_repo) = (Arc::clone(&client), repo.clone());
+			feed::restart(
+				dialog,
+				Arc::clone(&client),
+				commits,
+				move || commits_client.commits(&commits_repo, Some(&name)),
+				"Could Not Load Commits",
+			);
+		});
+	}
+}
+
+/// Lists `repo`'s branches in `choice`, its default branch first and chosen, which `branch` is set
+/// to. Should they not arrive, `choice` says so and stays disabled, and the commits stay the
+/// default branch's.
+fn load_branches(
+	dialog: Dialog,
+	client: Arc<Client>,
+	repo: String,
+	choice: Choice,
+	branch: Rc<RefCell<Option<String>>>,
+) {
+	let fetch = background_blocking(move || {
+		let default = client.repository(&repo)?.default_branch;
+		Ok::<_, Error>((default, client.branches(&repo)?))
+	});
+	spawn_for(&dialog, async move {
+		let fetched = fetch.await;
+		choice.clear();
+		match fetched {
+			Ok((default, branches)) => {
+				let names = default_first(&default, branches.into_iter().map(|branch| branch.name));
+				for name in &names {
+					choice.append(name);
+				}
+				if names.is_empty() {
+					choice.append("No branches");
+				} else {
+					choice.enable(true);
+				}
+				*branch.borrow_mut() = names.into_iter().next();
+			}
+			Err(error) => {
+				tracing::warn!(%error, "couldn't load branches");
+				choice.append("Could not load branches");
+			}
+		}
+		choice.set_selection(0);
+	});
+}
+
+/// `names` with `default` moved to the front, or put there when they leave it out, as they do
+/// when a repository has more branches than are listed. An empty `default` is left out.
+fn default_first(default: &str, names: impl Iterator<Item = String>) -> Vec<String> {
+	let front = (!default.is_empty()).then(|| default.to_owned());
+	front.into_iter().chain(names.filter(|name| name != default)).collect()
 }
 
 /// What the dialog's rows do: a commit opens as a page, an issue or pull request as its thread,
@@ -266,7 +379,19 @@ fn file_line(file: &ChangedFile) -> String {
 mod tests {
 	use gitview_core::models::ChangedFile;
 
-	use super::file_line;
+	use super::{default_first, file_line};
+
+	fn names(names: &[&str]) -> Vec<String> {
+		names.iter().map(|name| (*name).to_owned()).collect()
+	}
+
+	#[test]
+	fn the_default_branch_comes_first_whether_or_not_it_was_listed() {
+		let listed = names(&["dev", "main", "release"]);
+		assert_eq!(default_first("main", listed.clone().into_iter()), names(&["main", "dev", "release"]));
+		assert_eq!(default_first("trunk", listed.clone().into_iter()), names(&["trunk", "dev", "main", "release"]));
+		assert_eq!(default_first("", listed.clone().into_iter()), listed);
+	}
 
 	fn file(status: &str, previous: Option<&str>, additions: u64, deletions: u64) -> ChangedFile {
 		ChangedFile {

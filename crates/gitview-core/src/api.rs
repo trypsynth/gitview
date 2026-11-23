@@ -1,4 +1,4 @@
-use std::{thread, time::Duration};
+use std::{fmt::Write, thread, time::Duration};
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use ureq::RequestBuilder;
@@ -6,9 +6,9 @@ use ureq::RequestBuilder;
 use crate::{
 	Error,
 	models::{
-		CloseReason, Comment, Commit, CommitDetails, Email, Issue, IssueState, Notification, Profile, ProfileUpdate,
-		Repository, RepositoryKind, RepositoryOrder, SearchOrder, SocialAccount, StarredOrder, SubjectDetails, User,
-		UserProfile,
+		Branch, CloseReason, Comment, Commit, CommitDetails, Email, Issue, IssueState, Notification, Profile,
+		ProfileUpdate, Repository, RepositoryKind, RepositoryOrder, SearchOrder, SocialAccount, StarredOrder,
+		SubjectDetails, User, UserProfile,
 	},
 	page::{At, Connection, Cursor, Kind, Page, link},
 };
@@ -24,6 +24,9 @@ const USER_AGENT: &str = concat!("gitview/", env!("CARGO_PKG_VERSION"));
 const PAGE_SIZE: usize = 100;
 /// How long to wait before asking again after GitHub has a server error.
 const SERVER_ERROR_WAIT: Duration = Duration::from_secs(1);
+/// How many pages of a repository's branches are listed, a hundred to a page. Past that, the rest
+/// are left out rather than waited for.
+const BRANCH_PAGES: usize = 10;
 
 #[derive(Serialize)]
 struct NewComment<'a> {
@@ -52,6 +55,21 @@ struct SocialAccountUrls<'a> {
 #[derive(Deserialize)]
 struct SearchResults<T> {
 	items: Vec<T>,
+}
+
+/// `text` made safe to put in a URL's query, such as a branch named `fix/a+b`: every byte but
+/// letters, digits and `-._~` is percent-encoded.
+fn query_value(text: &str) -> String {
+	let mut encoded = String::with_capacity(text.len());
+	for byte in text.bytes() {
+		if byte.is_ascii_alphanumeric() || b"-._~".contains(&byte) {
+			encoded.push(char::from(byte));
+		} else {
+			// Writing to a String can't fail.
+			let _ = write!(encoded, "%{byte:02X}");
+		}
+	}
+	encoded
 }
 
 /// The organization a 403's body names, when it refused because the organization limits what
@@ -291,13 +309,23 @@ impl Client {
 		Ok(page)
 	}
 
-	/// The newest commits on the default branch of `repo` (`owner/name`). A repository with no
-	/// commits yet has none, which GitHub answers with a conflict rather than an empty list.
-	pub fn commits(&self, repo: &str) -> Result<Page<Commit>, Error> {
-		match self.fetch_page(&format!("/repos/{repo}/commits?per_page=100"), Kind::Plain) {
+	/// The newest commits on `branch` of `repo` (`owner/name`), or on its default branch when
+	/// that's `None`. A repository with no commits yet has none, which GitHub answers with a
+	/// conflict rather than an empty list.
+	pub fn commits(&self, repo: &str, branch: Option<&str>) -> Result<Page<Commit>, Error> {
+		let on = branch.map(|branch| format!("&sha={}", query_value(branch))).unwrap_or_default();
+		match self.fetch_page(&format!("/repos/{repo}/commits?per_page=100{on}"), Kind::Plain) {
 			Err(Error::Http(ureq::Error::StatusCode(409))) => Ok(Page::empty()),
 			result => result,
 		}
+	}
+
+	/// The branches of `repo` (`owner/name`), by name, as far as the first [`BRANCH_PAGES`] pages
+	/// go.
+	pub fn branches(&self, repo: &str) -> Result<Vec<Branch>, Error> {
+		let mut page = self.fetch_page(&format!("/repos/{repo}/branches?per_page=100"), Kind::Plain)?;
+		self.load_pages(&mut page, BRANCH_PAGES - 1)?;
+		Ok(page.items)
 	}
 
 	/// Commit `sha` in `repo` (`owner/name`), with the files it changed and how.
@@ -563,7 +591,14 @@ impl Client {
 
 #[cfg(test)]
 mod tests {
-	use super::restricting_organization;
+	use super::{query_value, restricting_organization};
+
+	#[test]
+	fn a_query_value_keeps_only_unreserved_characters() {
+		assert_eq!(query_value("main"), "main");
+		assert_eq!(query_value("fix/a+b c#1"), "fix%2Fa%2Bb%20c%231");
+		assert_eq!(query_value("ünï"), "%C3%BCn%C3%AF");
+	}
 
 	#[test]
 	fn an_organizations_app_restrictions_are_told_from_other_refusals() {

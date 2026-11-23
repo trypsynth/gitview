@@ -93,8 +93,17 @@ pub struct Repository {
 	/// Whether its owner archived it, leaving it read-only.
 	#[serde(default)]
 	pub archived: bool,
+	/// The branch it opens on, such as `main`. Empty when GitHub leaves it out.
+	#[serde(default)]
+	pub default_branch: String,
 	pub stargazers_count: u64,
 	pub open_issues_count: u64,
+}
+
+/// A branch of a repository.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Branch {
+	pub name: String,
 }
 
 /// A commit as a repository's history lists it.
