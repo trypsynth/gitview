@@ -1,73 +1,40 @@
 # Gitview
 
-An accessible GitHub client for the desktop, made for screen readers first.
+Gitview is a native, keyboard-first GitHub client for Windows, made for screen reader users.
 
-## Templates
+## Documentation
 
-How each row reads is set by a template, which you can change in Settings, on the Templates page. A template is text with fields in double braces, such as `{{ title }}`, in [minijinja's syntax](https://docs.rs/minijinja/latest/minijinja/syntax/index.html). Parts can be left out when a field is empty or false: `{% if description %}: {{ description }}{% endif %}`.
+The [user manual](doc/readme.md) covers every feature, setting, and key.
 
-Reset to default puts a template back the way it came. A template you've left alone follows the default, even if a later Gitview changes it. A template with a mistake in it isn't saved, and if one ever fails to show a row, the row uses the default instead.
+## Building
 
-### Notifications
+You need Rust, and CMake and Ninja to build wxWidgets for wxDragon.
 
-- `repository`: the repository it's in, such as `trypsynth/gitview`.
-- `title`: what it's about, such as an issue's title.
-- `kind`: what it's about, such as `Issue`, `Pull request` or `Release`.
-- `reason`: why you got it, such as `mention` or `subscribed`.
-- `unread`: whether you haven't read it yet.
+```batch
+cargo build --release
+```
 
-Default: `{{ repository }}: {{ title }}. {{ kind }}, {{ reason }}`
+This makes `target/release/gitview.exe`.
 
-### Repositories
+- Stable Rust `1.91.1` is the minimum supported version. CI builds, tests, and lints on the latest stable.
+- Nightly Rust is only for formatting, with `cargo +nightly fmt`.
+- Clippy runs with `clippy::all`, `clippy::pedantic`, and `clippy::nursery`, and CI fails on any warning.
 
-- `name`: its owner and name, such as `trypsynth/gitview`.
-- `description`: what it says it's for, or nothing.
-- `private`: whether it's private.
-- `fork`: whether it's a fork.
-- `archived`: whether it's archived, and so read-only.
-- `stars`: how many have starred it.
-- `open_issues`: how many issues and pull requests are open.
+### Release Builds
 
-Default: `{{ name }}{% if description %}: {{ description }}{% endif %}{% if private %}, private{% endif %}{% if fork %}, fork{% endif %}{% if archived %}, archived{% endif %}`
+`cargo xtask release` builds Gitview and makes `gitview-x64.zip` and, with Inno Setup installed, `gitview_setup-x64.exe`, in `target/release`. On an Arm computer the names end in `arm64`. With a minisign key in `MINISIGN_KEY` and its password in `MINISIGN_PASSWORD`, it also signs them, and the updater installs only signed builds.
 
-### Issues and pull requests
+## Before Committing
 
-- `repository`: the repository it's in. It's empty in a repository's own dialog, where every row shares it.
-- `number`: its number, without the `#`.
-- `title`: its title.
-- `kind`: `issue` or `pull request`.
-- `author`: who opened it.
-- `comments`: how many comments it has, such as `1 comment` or `3 comments`.
-- `state`: `open` or `closed`.
-- `ending`: how a closed one ended, such as `completed`, `not planned`, `duplicate`, `merged` or `closed`. It's empty while it's open.
-- `time`: when it was opened.
+Format your changes:
 
-Default: `{% if repository %}{{ repository }}: #{{ number }} {{ title }}, {{ kind }} by {% else %}#{{ number }} {{ title }}, by {% endif %}{{ author }}, {{ comments }}{% if ending %}, {{ ending }}{% endif %}`
+```batch
+cargo +nightly fmt
+```
 
-### Commits
+The repository's pre-commit hooks run the same check:
 
-- `summary`: the first line of its message.
-- `author`: the author's GitHub username, or their name from git when GitHub doesn't know them.
-- `author_name`: the author's name, as their git settings give it.
-- `time`: when it was written.
-- `sha`: its short id, such as `de94f2a`.
-
-Default: `{{ summary }}, by {{ author }}, {{ time }}, {{ sha }}`
-
-### People
-
-- `login`: their username.
-- `name`: the name on their profile, when the list gives it.
-- `organization`: whether it's an organization rather than a person.
-
-Default: `{{ login }}{% if organization %}, organization{% endif %}`
-
-### Posts in a thread
-
-- `author`: who wrote it.
-- `time`: when it was written.
-- `text`: what it says.
-- `opening`: whether it opened the thread, rather than being a comment.
-- `kind`: `issue` or `pull request`, for the post that opened the thread. It's empty for comments.
-
-Default, with the text on a line of its own: `{% if opening %}{{ author }} opened this {{ kind }} on {{ time }}{% else %}{{ author }} commented on {{ time }}{% endif %}:` then `{{ text }}`
+```batch
+cargo install prek
+prek install
+```
