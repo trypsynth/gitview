@@ -3,6 +3,7 @@
 
 use std::{collections::BTreeMap, fs, io, path::PathBuf};
 
+use gitview_core::models::Repository;
 use homeport::Homeport;
 use logkeeper::Level;
 use serde::{Deserialize, Serialize};
@@ -29,6 +30,26 @@ pub struct Config {
 	pub updates: Updates,
 	/// The order each view is sorted in, by the view's name and the order's.
 	pub sorts: BTreeMap<String, String>,
+	/// What each view shows, by the view's name and the filter's.
+	pub filters: BTreeMap<String, String>,
+	pub repositories: RepositoryFilters,
+}
+
+/// What the Repositories view leaves out, whichever of its filters is chosen. GitHub can't leave
+/// these out itself, so Gitview does once they arrive.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RepositoryFilters {
+	pub hide_forks: bool,
+	pub hide_archived: bool,
+}
+
+impl RepositoryFilters {
+	/// Whether `repository` stays in the list.
+	#[must_use]
+	pub const fn shows(self, repository: &Repository) -> bool {
+		!(self.hide_forks && repository.fork || self.hide_archived && repository.archived)
+	}
 }
 
 /// Where updates come from, and whether Gitview looks for one when it starts.

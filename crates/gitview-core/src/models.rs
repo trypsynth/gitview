@@ -90,6 +90,9 @@ pub struct Repository {
 	pub description: Option<String>,
 	pub private: bool,
 	pub fork: bool,
+	/// Whether its owner archived it, leaving it read-only.
+	#[serde(default)]
+	pub archived: bool,
 	pub stargazers_count: u64,
 	pub open_issues_count: u64,
 }
@@ -210,6 +213,28 @@ impl RepositoryOrder {
 			Self::Pushed => "sort=pushed&direction=desc",
 			Self::Created => "sort=created&direction=desc",
 			Self::Name => "sort=full_name&direction=asc",
+		}
+	}
+}
+
+/// Which of the signed-in user's repositories GitHub lists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RepositoryKind {
+	/// Every one they can reach: their own, ones they collaborate on, and their organizations'.
+	All,
+	/// Only the ones they own.
+	Owned,
+	Public,
+	Private,
+}
+
+impl RepositoryKind {
+	pub(crate) const fn parameter(self) -> &'static str {
+		match self {
+			Self::All => "type=all",
+			Self::Owned => "type=owner",
+			Self::Public => "type=public",
+			Self::Private => "type=private",
 		}
 	}
 }

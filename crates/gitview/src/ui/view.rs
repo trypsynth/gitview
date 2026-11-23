@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use gitview_core::models::{RepositoryOrder, SearchOrder, StarredOrder};
+use gitview_core::models::{IssueState, RepositoryKind, RepositoryOrder, SearchOrder, StarredOrder};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum View {
@@ -41,13 +41,28 @@ impl View {
 		}
 	}
 
-	/// The filters this view offers, in menu order. Repository lists have none.
-	pub const fn filters(self) -> &'static [&'static str] {
+	/// The filters this view offers, in menu order, the first being its default.
+	pub const fn filters(self) -> &'static [Filter] {
 		match self {
-			Self::Notifications => &["&Unread", "&All"],
-			Self::Repositories | Self::Starred | Self::Watched => &[],
-			Self::Assigned | Self::ReviewRequested => &["&Open", "&Closed", "&All"],
+			Self::Notifications => &[Filter::Unread, Filter::All],
+			Self::Repositories => &[Filter::All, Filter::Owned, Filter::Public, Filter::Private],
+			Self::Starred | Self::Watched => &[],
+			Self::Assigned | Self::ReviewRequested => &[Filter::Open, Filter::Closed, Filter::All],
 		}
+	}
+
+	/// The filter this view has until the user picks another.
+	pub fn default_filter(self) -> Filter {
+		self.filters().first().copied().unwrap_or(Filter::All)
+	}
+
+	/// The filter the settings file says this view shows, or its default when it names none the
+	/// view offers.
+	pub fn saved_filter(self, filters: &BTreeMap<String, String>) -> Filter {
+		filters
+			.get(self.id())
+			.and_then(|id| self.filters().iter().copied().find(|filter| filter.id() == id))
+			.unwrap_or_else(|| self.default_filter())
 	}
 
 	/// The orders this view can be sorted in, in menu order, the first being its default. Some
@@ -120,7 +135,7 @@ pub fn arrange(order: &[String], hidden: &[String]) -> Vec<(View, bool)> {
 mod tests {
 	use std::collections::BTreeMap;
 
-	use super::{Sort, View, arrange};
+	use super::{Filter, Sort, View, arrange};
 
 	#[test]
 	fn a_saved_sort_is_used_only_when_the_view_offers_it() {
@@ -132,6 +147,18 @@ mod tests {
 		assert_eq!(View::Repositories.saved_sort(&saved), Sort::Updated);
 		assert_eq!(View::Assigned.saved_sort(&saved), Sort::Updated);
 		assert_eq!(View::Starred.saved_sort(&BTreeMap::new()), Sort::Starred);
+	}
+
+	#[test]
+	fn a_saved_filter_is_used_only_when_the_view_offers_it() {
+		let saved = BTreeMap::from([
+			("repositories".to_owned(), "private".to_owned()),
+			("notifications".to_owned(), "closed".to_owned()),
+		]);
+		assert_eq!(View::Repositories.saved_filter(&saved), Filter::Private);
+		assert_eq!(View::Notifications.saved_filter(&saved), Filter::Unread);
+		assert_eq!(View::Assigned.saved_filter(&saved), Filter::Open);
+		assert_eq!(View::Starred.saved_filter(&saved), Filter::All);
 	}
 
 	fn ids(ids: &[&str]) -> Vec<String> {
@@ -211,6 +238,63 @@ impl Sort {
 			Self::Opened => SearchOrder::Created,
 			Self::Comments => SearchOrder::Comments,
 			_ => SearchOrder::Updated,
+		}
+	}
+}
+
+/// What a view can be narrowed to. Which ones a view offers is up to [`View::filters`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Filter {
+	All,
+	Unread,
+	Open,
+	Closed,
+	Owned,
+	Public,
+	Private,
+}
+
+impl Filter {
+	/// What the settings file calls it.
+	pub const fn id(self) -> &'static str {
+		match self {
+			Self::All => "all",
+			Self::Unread => "unread",
+			Self::Open => "open",
+			Self::Closed => "closed",
+			Self::Owned => "owned",
+			Self::Public => "public",
+			Self::Private => "private",
+		}
+	}
+
+	/// What the Filter menu calls it.
+	pub const fn label(self) -> &'static str {
+		match self {
+			Self::All => "&All",
+			Self::Unread => "&Unread",
+			Self::Open => "&Open",
+			Self::Closed => "&Closed",
+			Self::Owned => "&Owned by me",
+			Self::Public => "&Public",
+			Self::Private => "Pri&vate",
+		}
+	}
+
+	pub const fn issue_state(self) -> IssueState {
+		match self {
+			Self::Closed => IssueState::Closed,
+			Self::All => IssueState::All,
+			_ => IssueState::Open,
+		}
+	}
+
+	pub const fn repository_kind(self) -> RepositoryKind {
+		match self {
+			Self::Owned => RepositoryKind::Owned,
+			Self::Public => RepositoryKind::Public,
+			Self::Private => RepositoryKind::Private,
+			_ => RepositoryKind::All,
 		}
 	}
 }

@@ -52,7 +52,7 @@ impl Kind {
 			Self::Notification => "{{ repository }}: {{ title }}. {{ kind }}, {{ reason }}",
 			Self::Repository => {
 				"{{ name }}{% if description %}: {{ description }}{% endif %}{% if private %}, private{% endif %}{% if \
-				 fork %}, fork{% endif %}"
+				 fork %}, fork{% endif %}{% if archived %}, archived{% endif %}"
 			}
 			// A repository's own dialog leaves out the repository, and the kind its section says.
 			Self::Issue => {

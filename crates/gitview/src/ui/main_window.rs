@@ -36,7 +36,7 @@ use super::{
 	sectioned::SectionedLists,
 	text::{self, repository_label},
 	update,
-	view::{self, Sort, View},
+	view::{self, Filter, Sort, View},
 };
 use crate::{config, template, token, ui::notice};
 
@@ -49,6 +49,8 @@ const ID_GO_TO_REPOSITORY: i32 = ID_HIGHEST + 7;
 const ID_GO_TO_USER: i32 = ID_HIGHEST + 8;
 const ID_CHECK_FOR_UPDATES: i32 = ID_HIGHEST + 9;
 const ID_FILTER_FIRST: i32 = ID_HIGHEST + 10;
+const ID_HIDE_FORKS: i32 = ID_HIGHEST + 16;
+const ID_HIDE_ARCHIVED: i32 = ID_HIGHEST + 17;
 const ID_SORT_FIRST: i32 = ID_HIGHEST + 20;
 const ACTIONS_MENU: usize = 1;
 const FILTER_MENU: usize = 2;
@@ -92,6 +94,21 @@ impl Items {
 			Self::Notifications(items) => items.iter().map(|item| item.id.as_str()).collect(),
 			Self::Repositories(items) => items.iter().map(|item| item.full_name.as_str()).collect(),
 			Self::Issues(items) => items.iter().map(|item| item.html_url.as_str()).collect(),
+		}
+	}
+
+	const fn is_empty(&self) -> bool {
+		match self {
+			Self::Notifications(items) => items.is_empty(),
+			Self::Repositories(items) => items.is_empty(),
+			Self::Issues(items) => items.is_empty(),
+		}
+	}
+
+	/// Leaves out the repositories `filters` hide.
+	fn hide(&mut self, filters: config::RepositoryFilters) {
+		if let Self::Repositories(items) = self {
+			items.retain(|item| filters.shows(item));
 		}
 	}
 
@@ -155,6 +172,34 @@ impl Fetched {
 		client.load_pages(&mut page, pages.saturating_sub(1))?;
 		Ok(Self { items: items(page.items), more: page.next.map(more), pages })
 	}
+
+	/// Leaves out the repositories `filters` hide, if any, going on to the next page while that
+	/// leaves nothing, so a list whose first page was all hidden doesn't look empty with more to
+	/// come.
+	fn hide(mut self, client: &Client, filters: Option<config::RepositoryFilters>) -> Result<Self, Error> {
+		let Some(filters) = filters else {
+			return Ok(self);
+		};
+		self.items.hide(filters);
+		while self.items.is_empty() {
+			let Some(more) = self.more.take() else {
+				break;
+			};
+			let (mut items, next) = more.load(client)?;
+			items.hide(filters);
+			self.items = items;
+			self.more = next;
+			self.pages += 1;
+		}
+		Ok(self)
+	}
+}
+
+/// A choice from the Filter or Sort menu, which is kept in the settings file.
+#[derive(Clone, Copy)]
+enum Choice {
+	Order,
+	Filter,
 }
 
 /// What a view holds once it has been fetched. The labels are kept so a poll that changed
@@ -178,8 +223,10 @@ struct State {
 	loading_more: [bool; View::COUNT],
 	/// Which way the lists run.
 	lists: config::Lists,
-	unread_only: bool,
-	issue_filter: IssueState,
+	/// What each view is narrowed to.
+	filters: [Filter; View::COUNT],
+	/// What the Repositories view leaves out, past its filter.
+	repository_filters: config::RepositoryFilters,
 	/// The order each view is sorted in.
 	sorts: [Sort; View::COUNT],
 	/// Set while the sign-in dialog is up, so the five views in flight cannot each raise
@@ -230,8 +277,8 @@ impl Default for State {
 			loaded: [const { None }; View::COUNT],
 			loading_more: [false; View::COUNT],
 			lists: config::Lists::default(),
-			unread_only: true,
-			issue_filter: IssueState::Open,
+			filters: View::ALL.map(View::default_filter),
+			repository_filters: config::RepositoryFilters::default(),
 			sorts: View::ALL.map(View::default_sort),
 			signing_in: false,
 			issue_changes: Vec::new(),
@@ -294,7 +341,16 @@ impl MainWindow {
 		let live_region = live::live_region(&panel);
 		panel.set_sizer(sections.sizer(2), true);
 		let sorts = View::ALL.map(|view| view.saved_sort(&config.sorts));
-		let state = State { arrangement, view: first, lists: config.lists, sorts, ..State::default() };
+		let filters = View::ALL.map(|view| view.saved_filter(&config.filters));
+		let state = State {
+			arrangement,
+			view: first,
+			lists: config.lists,
+			sorts,
+			filters,
+			repository_filters: config.repositories,
+			..State::default()
+		};
 		for (_, list) in sections.lists() {
 			list.set_start_at_end(config.lists.oldest_first);
 		}
@@ -400,7 +456,11 @@ impl MainWindow {
 			ID_SIGN_OUT => window.sign_out(),
 			ID_CHECK_FOR_UPDATES => window.check_for_updates(false),
 			ID_EXIT => window.frame.close(false),
-			id if (ID_FILTER_FIRST..ID_FILTER_FIRST + 3).contains(&id) => window.set_filter(id - ID_FILTER_FIRST),
+			id if (ID_FILTER_FIRST..ID_FILTER_FIRST + 4).contains(&id) => window.set_filter(id - ID_FILTER_FIRST),
+			ID_HIDE_FORKS => window.set_repository_filters(|filters| filters.hide_forks = !filters.hide_forks),
+			ID_HIDE_ARCHIVED => {
+				window.set_repository_filters(|filters| filters.hide_archived = !filters.hide_archived);
+			}
 			id if (ID_SORT_FIRST..ID_SORT_FIRST + 4).contains(&id) => window.set_sort(id - ID_SORT_FIRST),
 			// The context menu's choices arrive here too, passed up from the list.
 			id => match Action::from_id(id) {
@@ -756,29 +816,63 @@ impl MainWindow {
 		self.list(view).update_labelled(vec![(MESSAGE_KEY.to_owned(), message.to_owned())], Select::Start);
 	}
 
+	/// Narrows the selected view to the `index`th filter it offers, remembers that for next time,
+	/// and fetches it again, since GitHub does most of the filtering.
 	fn set_filter(&self, index: i32) {
-		{
-			let mut state = self.state.borrow_mut();
-			let view = state.view;
-			match view {
-				View::Notifications => state.unread_only = index == 0,
-				View::Repositories | View::Starred | View::Watched => return,
-				View::Assigned | View::ReviewRequested => {
-					state.issue_filter = match index {
-						0 => IssueState::Open,
-						1 => IssueState::Closed,
-						_ => IssueState::All,
-					};
-				}
-			}
-			// What is held no longer matches the filter, so it cannot stand in while the
-			// new fetch runs.
-			state.loaded[view.index()] = None;
-		}
 		let view = self.state.borrow().view;
+		let Some(&filter) = usize::try_from(index).ok().and_then(|index| view.filters().get(index)) else {
+			return;
+		};
+		if self.state.borrow().filters[view.index()] == filter {
+			return;
+		}
+		self.state.borrow_mut().filters[view.index()] = filter;
+		tracing::info!(view = view.id(), filter = filter.id(), "filter changed");
+		self.remember(Choice::Filter, |config| {
+			config.filters.insert(view.id().to_owned(), filter.id().to_owned());
+		});
+		// What is held no longer matches the filter.
+		self.fetch_afresh(view);
+	}
+
+	/// Changes what the Repositories view leaves out, remembers that for next time, and fetches it
+	/// again, since what it left out before is gone.
+	fn set_repository_filters(&self, change: impl FnOnce(&mut config::RepositoryFilters)) {
+		let filters = {
+			let mut state = self.state.borrow_mut();
+			change(&mut state.repository_filters);
+			state.repository_filters
+		};
+		tracing::info!(forks = filters.hide_forks, archived = filters.hide_archived, "hidden repositories changed");
+		self.remember(Choice::Filter, |config| config.repositories = filters);
+		self.fetch_afresh(View::Repositories);
+	}
+
+	/// Empties `view` and fetches it again, for when what it holds no longer fits what it should
+	/// show, so it can't stand in while the new fetch runs.
+	fn fetch_afresh(&self, view: View) {
+		self.state.borrow_mut().loaded[view.index()] = None;
 		self.clear(view);
 		self.update_actions_menu();
 		self.fetch(view);
+	}
+
+	/// Saves a choice the user made, such as an order, in the settings file. When it can't, the
+	/// choice lasts until Gitview closes, and the user is told so, with `what` naming the choice.
+	fn remember(&self, what: Choice, change: impl FnOnce(&mut config::Config)) {
+		let mut config = config::load();
+		change(&mut config);
+		if let Err(error) = config::save(&config) {
+			let (name, title) = match what {
+				Choice::Order => ("order", "Order Not Saved"),
+				Choice::Filter => ("filter", "Filter Not Saved"),
+			};
+			notice::warning(
+				&self.frame,
+				format!("Gitview could not save the {name}, so it will only last until it closes. {error}"),
+				title,
+			);
+		}
 	}
 
 	/// Sorts the selected view in the `index`th order it offers, remembers that for next time, and
@@ -794,22 +888,13 @@ impl MainWindow {
 				return;
 			}
 			state.sorts[view.index()] = sort;
-			// What is held is in the old order, so it cannot stand in while the new fetch runs.
-			state.loaded[view.index()] = None;
 		}
 		tracing::info!(view = view.id(), sort = sort.id(), "sort changed");
-		let mut config = config::load();
-		config.sorts.insert(view.id().to_owned(), sort.id().to_owned());
-		if let Err(error) = config::save(&config) {
-			notice::warning(
-				&self.frame,
-				format!("Gitview could not save the order, so it will only last until it closes. {error}"),
-				"Order Not Saved",
-			);
-		}
-		self.clear(view);
-		self.update_actions_menu();
-		self.fetch(view);
+		self.remember(Choice::Order, |config| {
+			config.sorts.insert(view.id().to_owned(), sort.id().to_owned());
+		});
+		// What is held is in the old order.
+		self.fetch_afresh(view);
 	}
 
 	/// Rebuilds the Sort menu for the selected view, since the orders differ per view.
@@ -848,19 +933,27 @@ impl MainWindow {
 			menu.append(ID_FILTER_FIRST, "No filters for this view", "", ItemKind::Normal);
 			menu.enable_item(ID_FILTER_FIRST, false);
 		} else {
-			for (index, label) in filters.iter().enumerate() {
+			let current = state.filters[state.view.index()];
+			for (index, filter) in filters.iter().enumerate() {
 				let id = ID_FILTER_FIRST + i32::try_from(index).unwrap_or_default();
-				menu.append(id, label, "Show only these items", ItemKind::Radio);
+				menu.append(id, filter.label(), "Show only these items", ItemKind::Radio);
+				if *filter == current {
+					menu.check_item(id, true);
+				}
 			}
-			let selected = match state.view {
-				View::Notifications => i32::from(!state.unread_only),
-				_ => match state.issue_filter {
-					IssueState::Open => 0,
-					IssueState::Closed => 1,
-					IssueState::All => 2,
-				},
-			};
-			menu.check_item(ID_FILTER_FIRST + selected, true);
+		}
+		if state.view == View::Repositories {
+			let hidden = state.repository_filters;
+			menu.append_separator();
+			menu.append(ID_HIDE_FORKS, "Hide &forks", "Leave forks out of the list", ItemKind::Check);
+			menu.check_item(ID_HIDE_FORKS, hidden.hide_forks);
+			menu.append(
+				ID_HIDE_ARCHIVED,
+				"Hide a&rchived",
+				"Leave archived repositories out of the list",
+				ItemKind::Check,
+			);
+			menu.check_item(ID_HIDE_ARCHIVED, hidden.hide_archived);
 		}
 		menu_bar.replace(FILTER_MENU, menu, "F&ilter");
 	}
@@ -874,10 +967,11 @@ impl MainWindow {
 	/// Asks GitHub for `view` again, as many pages as it has loaded. The list keeps what it has
 	/// until the answer arrives.
 	fn fetch(&self, view: View) {
-		let (Some(client), unread_only, issue_filter, sort, pages) = ({
+		let (Some(client), filter, hidden, sort, pages) = ({
 			let state = self.state.borrow();
 			let pages = state.loaded[view.index()].as_ref().map_or(1, |loaded| loaded.pages);
-			(state.client.clone(), state.unread_only, state.issue_filter, state.sorts[view.index()], pages)
+			let hidden = (view == View::Repositories).then_some(state.repository_filters);
+			(state.client.clone(), state.filters[view.index()], hidden, state.sorts[view.index()], pages)
 		}) else {
 			return;
 		};
@@ -886,18 +980,19 @@ impl MainWindow {
 			match view {
 				View::Notifications => Fetched::load(
 					client,
-					client.notifications(!unread_only),
+					client.notifications(filter != Filter::Unread),
 					pages,
 					Items::Notifications,
 					More::Notifications,
 				),
 				View::Repositories => Fetched::load(
 					client,
-					client.repositories(sort.repository_order()),
+					client.repositories(filter.repository_kind(), sort.repository_order()),
 					pages,
 					Items::Repositories,
 					More::Repositories,
-				),
+				)
+				.and_then(|fetched| fetched.hide(client, hidden)),
 				View::Starred => Fetched::load(
 					client,
 					client.starred(sort.starred_order()),
@@ -910,14 +1005,14 @@ impl MainWindow {
 				}
 				View::Assigned => Fetched::load(
 					client,
-					client.assigned(issue_filter, sort.search_order()),
+					client.assigned(filter.issue_state(), sort.search_order()),
 					pages,
 					Items::Issues,
 					More::Issues,
 				),
 				View::ReviewRequested => Fetched::load(
 					client,
-					client.review_requests(issue_filter, sort.search_order()),
+					client.review_requests(filter.issue_state(), sort.search_order()),
 					pages,
 					Items::Issues,
 					More::Issues,
@@ -935,25 +1030,29 @@ impl MainWindow {
 		let list = self.list(view);
 		let lists = self.state.borrow().lists;
 		let at_end = list.selected_index().is_some_and(|index| lists.at_oldest(index, list.len()));
-		let (client, more) = {
+		let (client, more, hidden) = {
 			let mut state = self.state.borrow_mut();
 			let more = state.loaded[view.index()].as_ref().and_then(|loaded| loaded.more.clone());
+			let hidden = (view == View::Repositories).then_some(state.repository_filters);
 			let (Some(client), Some(more), true, false) =
 				(state.client.clone(), more, at_end, state.loading_more[view.index()])
 			else {
 				return;
 			};
 			state.loading_more[view.index()] = true;
-			(client, more)
+			(client, more, hidden)
 		};
 		tracing::debug!(view = view.id(), "loading more");
-		let page = background_blocking(move || more.load(&client));
+		let page = background_blocking(move || {
+			let (items, more) = more.load(&client)?;
+			Fetched { items, more, pages: 1 }.hide(&client, hidden)
+		});
 		let window = self.clone();
 		spawn_for(&self.frame, async move {
 			let page = page.await;
 			window.state.borrow_mut().loading_more[view.index()] = false;
 			match page {
-				Ok((items, more)) => window.add_page(view, items, more),
+				Ok(fetched) => window.add_page(view, fetched),
 				Err(error) => {
 					tracing::warn!(view = view.id(), %error, "couldn't load more");
 					if window.state.borrow().view == view {
@@ -964,21 +1063,21 @@ impl MainWindow {
 		});
 	}
 
-	/// Puts a page loaded at the end of `view` after what it already holds.
-	fn add_page(&self, view: View, items: Items, more: Option<More>) {
+	/// Puts the pages loaded at the end of `view` after what it already holds.
+	fn add_page(&self, view: View, Fetched { items, more, pages }: Fetched) {
 		{
 			let mut state = self.state.borrow_mut();
-			let State { loaded, issue_changes, issue_filter, .. } = &mut *state;
+			let State { loaded, issue_changes, filters, .. } = &mut *state;
 			let Some(loaded) = loaded[view.index()].as_mut() else {
 				return;
 			};
 			loaded.items.extend(items);
 			if let Items::Issues(issues) = &mut loaded.items {
-				IssueChange::apply(issue_changes, issues, *issue_filter);
+				IssueChange::apply(issue_changes, issues, filters[view.index()].issue_state());
 			}
 			loaded.labels = loaded.items.labels();
 			loaded.more = more;
-			loaded.pages += 1;
+			loaded.pages += pages;
 			tracing::debug!(view = view.id(), items = loaded.labels.len(), "loaded more");
 		}
 		self.fill(view);
@@ -1018,7 +1117,7 @@ impl MainWindow {
 		if let Items::Issues(issues) = &mut items {
 			let mut state = self.state.borrow_mut();
 			state.issue_changes.retain(|change| change.made.elapsed() < SEARCH_CATCH_UP);
-			IssueChange::apply(&state.issue_changes, issues, state.issue_filter);
+			IssueChange::apply(&state.issue_changes, issues, state.filters[view.index()].issue_state());
 		}
 		let labels = items.labels();
 		tracing::debug!(view = view.id(), items = labels.len(), "loaded");
@@ -1268,14 +1367,14 @@ impl MainWindow {
 	fn apply_issue_changes(&self, view: View) {
 		{
 			let mut state = self.state.borrow_mut();
-			let State { loaded, issue_changes, issue_filter, .. } = &mut *state;
+			let State { loaded, issue_changes, filters, .. } = &mut *state;
 			let Some(loaded) = loaded[view.index()].as_mut() else {
 				return;
 			};
 			let Items::Issues(issues) = &mut loaded.items else {
 				return;
 			};
-			IssueChange::apply(issue_changes, issues, *issue_filter);
+			IssueChange::apply(issue_changes, issues, filters[view.index()].issue_state());
 			loaded.labels = loaded.items.labels();
 		}
 		self.fill(view);

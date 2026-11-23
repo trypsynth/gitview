@@ -7,7 +7,8 @@ use crate::{
 	Error,
 	models::{
 		CloseReason, Comment, Commit, CommitDetails, Email, Issue, IssueState, Notification, Profile, ProfileUpdate,
-		Repository, RepositoryOrder, SearchOrder, SocialAccount, StarredOrder, SubjectDetails, User, UserProfile,
+		Repository, RepositoryKind, RepositoryOrder, SearchOrder, SocialAccount, StarredOrder, SubjectDetails, User,
+		UserProfile,
 	},
 	page::{At, Connection, Cursor, Kind, Page, link},
 };
@@ -237,9 +238,9 @@ impl Client {
 		self.get(&format!("/repos/{repo}"))
 	}
 
-	/// The signed-in user's repositories, in `order`.
-	pub fn repositories(&self, order: RepositoryOrder) -> Result<Page<Repository>, Error> {
-		self.fetch_page(&format!("/user/repos?{}&per_page=100", order.parameters()), Kind::Plain)
+	/// The signed-in user's repositories of `kind`, in `order`.
+	pub fn repositories(&self, kind: RepositoryKind, order: RepositoryOrder) -> Result<Page<Repository>, Error> {
+		self.fetch_page(&format!("/user/repos?{}&{}&per_page=100", kind.parameter(), order.parameters()), Kind::Plain)
 	}
 
 	/// Repositories the signed-in user has starred, in `order`.

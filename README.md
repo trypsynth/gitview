@@ -24,10 +24,11 @@ Default: `{{ repository }}: {{ title }}. {{ kind }}, {{ reason }}`
 - `description`: what it says it's for, or nothing.
 - `private`: whether it's private.
 - `fork`: whether it's a fork.
+- `archived`: whether it's archived, and so read-only.
 - `stars`: how many have starred it.
 - `open_issues`: how many issues and pull requests are open.
 
-Default: `{{ name }}{% if description %}: {{ description }}{% endif %}{% if private %}, private{% endif %}{% if fork %}, fork{% endif %}`
+Default: `{{ name }}{% if description %}: {{ description }}{% endif %}{% if private %}, private{% endif %}{% if fork %}, fork{% endif %}{% if archived %}, archived{% endif %}`
 
 ### Issues and pull requests
 

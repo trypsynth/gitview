@@ -12,6 +12,7 @@ pub fn repository_label(repository: &Repository) -> String {
 		description => repository.description.as_deref().unwrap_or_default(),
 		private => repository.private,
 		fork => repository.fork,
+		archived => repository.archived,
 		stars => repository.stargazers_count,
 		open_issues => repository.open_issues_count,
 	};
