@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use gitview_core::models::{IssueState, RepositoryKind, RepositoryOrder, SearchOrder, StarredOrder};
+use gitview_core::models::{IssueKind, IssueState, RepositoryKind, RepositoryOrder, SearchOrder, StarredOrder};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum View {
@@ -63,6 +63,16 @@ impl View {
 			.get(self.id())
 			.and_then(|id| self.filters().iter().copied().find(|filter| filter.id() == id))
 			.unwrap_or_else(|| self.default_filter())
+	}
+
+	/// What the list says when it's empty, which in Assigned to me depends on whether it lists
+	/// issues, pull requests, or both.
+	pub const fn empty_message_for(self, kind: IssueKind) -> &'static str {
+		match (self, kind) {
+			(Self::Assigned, IssueKind::Issues) => "No issues assigned to you.",
+			(Self::Assigned, IssueKind::PullRequests) => "No pull requests assigned to you.",
+			_ => self.empty_message(),
+		}
 	}
 
 	/// The orders this view can be sorted in, in menu order, the first being its default. Some
@@ -135,7 +145,18 @@ pub fn arrange(order: &[String], hidden: &[String]) -> Vec<(View, bool)> {
 mod tests {
 	use std::collections::BTreeMap;
 
-	use super::{Filter, Sort, View, arrange};
+	use super::{Filter, Sort, View, arrange, issue_kind_id, saved_issue_kind};
+
+	#[test]
+	fn the_assigned_kind_is_saved_and_read_back_and_defaults_to_both() {
+		use gitview_core::models::IssueKind;
+		for kind in [IssueKind::Both, IssueKind::Issues, IssueKind::PullRequests] {
+			assert_eq!(saved_issue_kind(Some(issue_kind_id(kind))), kind);
+		}
+		assert_eq!(issue_kind_id(IssueKind::PullRequests), "pull_requests");
+		assert_eq!(saved_issue_kind(Some("discussions")), IssueKind::Both);
+		assert_eq!(saved_issue_kind(None), IssueKind::Both);
+	}
 
 	#[test]
 	fn a_saved_sort_is_used_only_when_the_view_offers_it() {
@@ -297,4 +318,22 @@ impl Filter {
 			_ => RepositoryKind::All,
 		}
 	}
+}
+
+/// The kinds Assigned to me can list, in the Filter menu's order, with what the menu and the
+/// settings file call them.
+pub const ISSUE_KINDS: [(IssueKind, &str, &str); 3] = [
+	(IssueKind::Both, "&Both", "both"),
+	(IssueKind::Issues, "&Issues", "issues"),
+	(IssueKind::PullRequests, "&Pull requests", "pull_requests"),
+];
+
+/// The kind the settings file names, or both when it names none Gitview knows.
+pub fn saved_issue_kind(id: Option<&str>) -> IssueKind {
+	ISSUE_KINDS.iter().find(|(_, _, name)| Some(*name) == id).map_or(IssueKind::Both, |(kind, _, _)| *kind)
+}
+
+/// What the settings file calls `kind`.
+pub fn issue_kind_id(kind: IssueKind) -> &'static str {
+	ISSUE_KINDS.iter().find(|(each, _, _)| *each == kind).map_or("both", |(_, _, name)| name)
 }

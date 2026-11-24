@@ -39,6 +39,7 @@ To change the order of the views, select one and press `Shift+Up` or `Shift+Down
   - Notifications: `Unread` or `All`.
   - Repositories: `All`, `Owned by me`, `Public`, or `Private`. `Hide forks` and `Hide archived` remove those from the list.
   - Assigned to me and Review requested: `Open`, `Closed`, or `All`.
+  - Assigned to me also has `Both`, `Issues`, and `Pull requests`, to list only one kind. The two choices work together, so `Closed` and `Pull requests` lists your closed pull requests.
 - The `Sort` menu chooses the order of a view, when GitHub can give it in more than one order:
   - Repositories: `Last updated`, `Last pushed`, `Date created`, or `Name`.
   - Starred: `Date starred` or `Last updated`.

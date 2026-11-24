@@ -8,7 +8,7 @@ use std::{
 
 use gitview_core::{
 	Client, Cursor, Error, Page,
-	models::{CloseReason, Issue, IssueState, Notification, Repository},
+	models::{CloseReason, Issue, IssueKind, IssueState, Notification, Repository},
 };
 use key_chord::KeyChord;
 use quiet_list::{QuietList, Select};
@@ -52,6 +52,7 @@ const ID_VIEW_HELP: i32 = ID_HIGHEST + 30;
 const ID_FILTER_FIRST: i32 = ID_HIGHEST + 10;
 const ID_HIDE_FORKS: i32 = ID_HIGHEST + 16;
 const ID_HIDE_ARCHIVED: i32 = ID_HIGHEST + 17;
+const ID_KIND_FIRST: i32 = ID_HIGHEST + 25;
 const ID_SORT_FIRST: i32 = ID_HIGHEST + 20;
 const ACTIONS_MENU: usize = 1;
 const FILTER_MENU: usize = 2;
@@ -226,6 +227,8 @@ struct State {
 	lists: config::Lists,
 	/// What each view is narrowed to.
 	filters: [Filter; View::COUNT],
+	/// Whether Assigned to me lists issues, pull requests, or both.
+	assigned_kind: IssueKind,
 	/// What the Repositories view leaves out, past its filter.
 	repository_filters: config::RepositoryFilters,
 	/// The order each view is sorted in.
@@ -279,6 +282,7 @@ impl Default for State {
 			loading_more: [false; View::COUNT],
 			lists: config::Lists::default(),
 			filters: View::ALL.map(View::default_filter),
+			assigned_kind: IssueKind::Both,
 			repository_filters: config::RepositoryFilters::default(),
 			sorts: View::ALL.map(View::default_sort),
 			signing_in: false,
@@ -349,6 +353,7 @@ impl MainWindow {
 			lists: config.lists,
 			sorts,
 			filters,
+			assigned_kind: view::saved_issue_kind(config.assigned_kind.as_deref()),
 			repository_filters: config.repositories,
 			..State::default()
 		};
@@ -475,6 +480,7 @@ impl MainWindow {
 			ID_VIEW_HELP => window.view_help(),
 			ID_EXIT => window.frame.close(false),
 			id if (ID_FILTER_FIRST..ID_FILTER_FIRST + 4).contains(&id) => window.set_filter(id - ID_FILTER_FIRST),
+			id if (ID_KIND_FIRST..ID_KIND_FIRST + 3).contains(&id) => window.set_assigned_kind(id - ID_KIND_FIRST),
 			ID_HIDE_FORKS => window.set_repository_filters(|filters| filters.hide_forks = !filters.hide_forks),
 			ID_HIDE_ARCHIVED => {
 				window.set_repository_filters(|filters| filters.hide_archived = !filters.hide_archived);
@@ -940,6 +946,22 @@ impl MainWindow {
 	}
 
 	/// Rebuilds the Filter menu for the selected view, since the filters differ per view.
+	/// Lists the `index`th kind of [`view::ISSUE_KINDS`] in Assigned to me, remembers that, and
+	/// fetches it again, since GitHub's search does the choosing.
+	fn set_assigned_kind(&self, index: i32) {
+		let Some(&(kind, _, _)) = usize::try_from(index).ok().and_then(|index| view::ISSUE_KINDS.get(index)) else {
+			return;
+		};
+		if self.state.borrow().assigned_kind == kind {
+			return;
+		}
+		self.state.borrow_mut().assigned_kind = kind;
+		let id = view::issue_kind_id(kind);
+		tracing::info!(kind = id, "assigned kind changed");
+		self.remember(Choice::Filter, |config| config.assigned_kind = Some(id.to_owned()));
+		self.fetch_afresh(View::Assigned);
+	}
+
 	fn update_filter_menu(&self) {
 		let Some(menu_bar) = self.frame.get_menu_bar() else {
 			return;
@@ -956,6 +978,16 @@ impl MainWindow {
 				let id = ID_FILTER_FIRST + i32::try_from(index).unwrap_or_default();
 				menu.append(id, filter.label(), "Show only these items", ItemKind::Radio);
 				if *filter == current {
+					menu.check_item(id, true);
+				}
+			}
+		}
+		if state.view == View::Assigned {
+			menu.append_separator();
+			for (index, (kind, label, _)) in view::ISSUE_KINDS.iter().enumerate() {
+				let id = ID_KIND_FIRST + i32::try_from(index).unwrap_or_default();
+				menu.append(id, label, "Show only these items", ItemKind::Radio);
+				if *kind == state.assigned_kind {
 					menu.check_item(id, true);
 				}
 			}
@@ -985,11 +1017,12 @@ impl MainWindow {
 	/// Asks GitHub for `view` again, as many pages as it has loaded. The list keeps what it has
 	/// until the answer arrives.
 	fn fetch(&self, view: View) {
-		let (Some(client), filter, hidden, sort, pages) = ({
+		let (Some(client), filter, assigned_kind, hidden, sort, pages) = ({
 			let state = self.state.borrow();
 			let pages = state.loaded[view.index()].as_ref().map_or(1, |loaded| loaded.pages);
 			let hidden = (view == View::Repositories).then_some(state.repository_filters);
-			(state.client.clone(), state.filters[view.index()], hidden, state.sorts[view.index()], pages)
+			let filter = state.filters[view.index()];
+			(state.client.clone(), filter, state.assigned_kind, hidden, state.sorts[view.index()], pages)
 		}) else {
 			return;
 		};
@@ -1023,7 +1056,7 @@ impl MainWindow {
 				}
 				View::Assigned => Fetched::load(
 					client,
-					client.assigned(filter.issue_state(), sort.search_order()),
+					client.assigned(filter.issue_state(), assigned_kind, sort.search_order()),
 					pages,
 					Items::Issues,
 					More::Issues,
@@ -1173,7 +1206,7 @@ impl MainWindow {
 				return;
 			};
 			if loaded.labels.is_empty() {
-				vec![(MESSAGE_KEY.to_owned(), view.empty_message().to_owned())]
+				vec![(MESSAGE_KEY.to_owned(), view.empty_message_for(state.assigned_kind).to_owned())]
 			} else {
 				let rows = loaded.items.keys().into_iter().map(str::to_owned).zip(loaded.labels.iter().cloned());
 				// Items are held newest first, as GitHub sends them.

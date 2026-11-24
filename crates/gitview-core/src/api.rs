@@ -7,9 +7,9 @@ use crate::{
 	Error,
 	models::{
 		Branch, Check, CheckResult, CloseReason, Comment, Commit, CommitActivity, CommitDetails, Email, Issue,
-		IssueState, Notification, Profile, ProfileUpdate, PullRequestState, PullRequestStatus, PullRequestSummary,
-		Repository, RepositoryKind, RepositoryOrder, ReviewDecision, SearchOrder, SocialAccount, StarredOrder,
-		SubjectDetails, User, UserProfile,
+		IssueKind, IssueState, Notification, Profile, ProfileUpdate, PullRequestState, PullRequestStatus,
+		PullRequestSummary, Repository, RepositoryKind, RepositoryOrder, ReviewDecision, SearchOrder, SocialAccount,
+		StarredOrder, SubjectDetails, User, UserProfile,
 	},
 	page::{At, Connection, Cursor, Kind, Page, link},
 };
@@ -583,8 +583,9 @@ impl Client {
 	}
 
 	/// Issues and pull requests assigned to the signed-in user, across every repository.
-	pub fn assigned(&self, state: IssueState, order: SearchOrder) -> Result<Page<Issue>, Error> {
-		self.search("assignee:@me", state, order)
+	pub fn assigned(&self, state: IssueState, kind: IssueKind, order: SearchOrder) -> Result<Page<Issue>, Error> {
+		let query = format!("assignee:@me {}", kind.as_qualifier());
+		self.search(query.trim_end(), state, order)
 	}
 
 	/// Pull requests waiting for the signed-in user's review.

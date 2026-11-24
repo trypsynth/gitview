@@ -356,6 +356,27 @@ impl SearchOrder {
 	}
 }
 
+/// Which of issues and pull requests a search finds.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum IssueKind {
+	#[default]
+	Both,
+	Issues,
+	PullRequests,
+}
+
+impl IssueKind {
+	/// The qualifier the search endpoint takes, empty for both.
+	#[must_use]
+	pub const fn as_qualifier(self) -> &'static str {
+		match self {
+			Self::Both => "",
+			Self::Issues => "is:issue",
+			Self::PullRequests => "is:pr",
+		}
+	}
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IssueState {
 	Open,
@@ -658,6 +679,14 @@ mod tests {
 			parents: Vec::new(),
 			check_state: None,
 		}
+	}
+
+	#[test]
+	fn a_search_kind_adds_its_qualifier_and_both_adds_none() {
+		use super::IssueKind;
+		assert_eq!(IssueKind::Both.as_qualifier(), "");
+		assert_eq!(IssueKind::Issues.as_qualifier(), "is:issue");
+		assert_eq!(IssueKind::PullRequests.as_qualifier(), "is:pr");
 	}
 
 	#[test]

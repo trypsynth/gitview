@@ -33,6 +33,9 @@ pub struct Config {
 	/// What each view shows, by the view's name and the filter's.
 	pub filters: BTreeMap<String, String>,
 	pub repositories: RepositoryFilters,
+	/// Whether Assigned to me lists issues, pull requests, or both: `issues`, `pull_requests`,
+	/// or `both`.
+	pub assigned_kind: Option<String>,
 }
 
 /// What the Repositories view leaves out, whichever of its filters is chosen. GitHub can't leave
