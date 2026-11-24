@@ -10,7 +10,7 @@ use std::{
 
 use gitview_core::{
 	Client, Error,
-	models::{ChangedFile, Commit, CommitDetails, Issue, IssueState, Parent},
+	models::{ChangedFile, Check, Commit, CommitActivity, CommitDetails, Issue, IssueState, Parent},
 };
 use wx_utils::{
 	dialog_padding,
@@ -25,7 +25,7 @@ use crate::{
 		feed::{self, Feed, FeedSection, RowActions, Shared},
 		live, notice,
 		sectioned::SectionedLists,
-		text::{self, commit_label, count, local_time},
+		text::{self, checks_summary, commit_label, count, duration, local_time},
 		web,
 	},
 };
@@ -321,13 +321,22 @@ fn issue_row(section: Section, issue: &Issue) -> Option<(String, String)> {
 
 /// Loads commit `sha` with what it changed, and shows it as a page.
 fn open_commit(dialog: Dialog, client: Arc<Client>, repo: String, sha: String) {
+	let (activity_client, activity_repo, activity_sha) = (Arc::clone(&client), repo.clone(), sha.clone());
+	// Both at once, so the pull requests and checks cost no extra wait.
 	let fetch = background_blocking(move || client.commit(&repo, &sha));
+	let activity = background_blocking(move || activity_client.commit_activity(&activity_repo, &activity_sha));
 	spawn_for(&dialog, async move {
-		match fetch.await {
+		let details = fetch.await;
+		// Without them, as when an organization keeps third-party apps out, the page goes without.
+		let activity = activity
+			.await
+			.inspect_err(|error| tracing::warn!(%error, "couldn't load a commit's pull requests and checks"))
+			.ok();
+		match details {
 			Ok(details) => {
 				let commit = &details.commit;
 				let meta = format!("{} committed on {}", commit.author_name(), local_time(&commit.commit.author.date));
-				show_page(&dialog, commit.summary(), &meta, &commit_page(&details));
+				show_page(&dialog, commit.summary(), &meta, &commit_page(&details, activity.as_ref()));
 			}
 			Err(error) => notice::error(&dialog, error, "Could Not Open Commit"),
 		}
@@ -341,7 +350,7 @@ fn issue_label(issue: &Issue) -> String {
 
 /// The page under a commit's heading: the rest of its message, then what it changed, file by
 /// file.
-fn commit_page(details: &CommitDetails) -> String {
+fn commit_page(details: &CommitDetails, activity: Option<&CommitActivity>) -> String {
 	let mut page = String::new();
 	let description = details.commit.description();
 	if !description.is_empty() {
@@ -352,7 +361,29 @@ fn commit_page(details: &CommitDetails) -> String {
 		// Writing to a String can't fail.
 		let _ = write!(page, "<li>{}</li>", web::escape(&line));
 	}
+	let (pull_requests, checks) =
+		activity.map_or((&[][..], &[][..]), |activity| (activity.pull_requests.as_slice(), activity.checks.as_slice()));
+	for pull in pull_requests {
+		let _ = write!(
+			page,
+			"<li>Pull request: <a href=\"{}\">#{} {}</a>, {}</li>",
+			web::escape(&pull.url),
+			pull.number,
+			web::escape(&pull.title),
+			pull.state.label()
+		);
+	}
+	if !checks.is_empty() {
+		let _ = write!(page, "<li>Checks: {}</li>", checks_summary(checks));
+	}
 	page.push_str("</ul>");
+	if !checks.is_empty() {
+		page.push_str("<h2>Checks</h2><ul>");
+		for check in checks {
+			page.push_str(&check_line(check));
+		}
+		page.push_str("</ul>");
+	}
 	let files = u64::try_from(details.files.len()).unwrap_or(u64::MAX);
 	// Writing to a String can't fail.
 	let _ = write!(
@@ -401,6 +432,25 @@ fn commit_details(commit: &Commit) -> Vec<String> {
 		_ => {}
 	}
 	lines
+}
+
+/// One check as the Checks section lists it: its name, linking to its page when it has one, how
+/// it went, and how long it took once it finished.
+fn check_line(check: &Check) -> String {
+	let mut name = web::escape(&check.name);
+	if let Some(url) = &check.url {
+		name = format!("<a href=\"{}\">{name}</a>", web::escape(url));
+	}
+	let mut how = check.result.label().to_owned();
+	if let Some(took) = check
+		.started
+		.as_deref()
+		.zip(check.finished.as_deref())
+		.and_then(|(started, finished)| duration(started, finished))
+	{
+		how = format!("{how}, {took}");
+	}
+	format!("<li>{name}: {how}</li>")
 }
 
 /// How one file changed, such as "Modified src/main.rs: 3 additions, 1 deletion".

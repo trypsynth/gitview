@@ -1,5 +1,5 @@
 use chrono::{DateTime, Local};
-use gitview_core::models::{Commit, Issue, Repository, User};
+use gitview_core::models::{Check, CheckResult, Commit, Issue, Repository, User};
 use minijinja::context;
 
 use super::web;
@@ -75,6 +75,32 @@ pub fn count(number: u64, one: &str, many: &str) -> String {
 	format!("{number} {}", if number == 1 { one } else { many })
 }
 
+/// How many checks ended each way, the failures first, such as "1 failed, 3 passed".
+pub fn checks_summary(checks: &[Check]) -> String {
+	let mut counts: Vec<(CheckResult, u64)> = Vec::new();
+	for check in checks {
+		match counts.iter_mut().find(|(result, _)| *result == check.result) {
+			Some((_, count)) => *count += 1,
+			None => counts.push((check.result, 1)),
+		}
+	}
+	counts.sort_by_key(|(result, _)| *result);
+	counts.iter().map(|(result, count)| format!("{count} {}", result.label())).collect::<Vec<_>>().join(", ")
+}
+
+/// How long something took between two GitHub timestamps, such as "45 seconds" or "3 minutes",
+/// when both parse.
+pub fn duration(started: &str, finished: &str) -> Option<String> {
+	let started = started.parse::<DateTime<Local>>().ok()?;
+	let finished = finished.parse::<DateTime<Local>>().ok()?;
+	let seconds = u64::try_from((finished - started).num_seconds()).ok()?;
+	Some(if seconds < 60 {
+		count(seconds, "second", "seconds")
+	} else {
+		count((seconds + 30) / 60, "minute", "minutes")
+	})
+}
+
 /// GitHub's own rendering of a body when the request asked for it, the raw markdown otherwise.
 pub fn body_html(html: Option<&str>, markdown: Option<&str>) -> String {
 	if let Some(html) = html.map(str::trim).filter(|html| !html.is_empty()) {
@@ -95,7 +121,28 @@ pub fn local_time(timestamp: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-	use super::local_time;
+	use gitview_core::models::{Check, CheckResult};
+
+	use super::{checks_summary, duration, local_time};
+
+	fn check(result: CheckResult) -> Check {
+		Check { name: String::new(), result, started: None, finished: None, url: None }
+	}
+
+	#[test]
+	fn checks_are_counted_failures_first() {
+		let checks = [CheckResult::Passed, CheckResult::Failed, CheckResult::Passed, CheckResult::Running].map(check);
+		assert_eq!(checks_summary(&checks), "1 failed, 1 running, 2 passed");
+		assert_eq!(checks_summary(&[]), "");
+	}
+
+	#[test]
+	fn a_duration_reads_in_seconds_then_minutes() {
+		assert_eq!(duration("2026-11-24T00:17:00Z", "2026-11-24T00:17:45Z").as_deref(), Some("45 seconds"));
+		assert_eq!(duration("2026-11-24T00:17:00Z", "2026-11-24T00:20:20Z").as_deref(), Some("3 minutes"));
+		assert_eq!(duration("2026-11-24T00:17:00Z", "2026-11-24T00:18:00Z").as_deref(), Some("1 minute"));
+		assert_eq!(duration("not a time", "2026-11-24T00:18:00Z"), None);
+	}
 
 	#[test]
 	fn timestamps_read_as_a_date_and_time() {

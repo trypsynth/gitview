@@ -499,6 +499,102 @@ impl SubjectDetails {
 	}
 }
 
+/// What happened around a commit on GitHub: the pull requests it's in, and its checks.
+#[derive(Debug, Clone, Default)]
+pub struct CommitActivity {
+	pub pull_requests: Vec<PullRequestSummary>,
+	pub checks: Vec<Check>,
+}
+
+/// A pull request, as a commit names it.
+#[derive(Debug, Clone)]
+pub struct PullRequestSummary {
+	pub number: u64,
+	pub title: String,
+	pub state: PullRequestState,
+	pub url: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PullRequestState {
+	Open,
+	Closed,
+	Merged,
+}
+
+impl PullRequestState {
+	#[must_use]
+	pub const fn label(self) -> &'static str {
+		match self {
+			Self::Open => "open",
+			Self::Closed => "closed",
+			Self::Merged => "merged",
+		}
+	}
+}
+
+/// One check on a commit: a check run, such as a GitHub Actions job, or a status another service
+/// set.
+#[derive(Debug, Clone)]
+pub struct Check {
+	pub name: String,
+	pub result: CheckResult,
+	/// When it started and finished, as GitHub timestamps, when it says.
+	pub started: Option<String>,
+	pub finished: Option<String>,
+	/// Its page, such as the job's log.
+	pub url: Option<String>,
+}
+
+/// How a check went, or that it hasn't finished.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum CheckResult {
+	Failed,
+	Running,
+	Waiting,
+	Passed,
+	Cancelled,
+	Skipped,
+	Neutral,
+}
+
+impl CheckResult {
+	#[must_use]
+	pub const fn label(self) -> &'static str {
+		match self {
+			Self::Failed => "failed",
+			Self::Running => "running",
+			Self::Waiting => "waiting",
+			Self::Passed => "passed",
+			Self::Cancelled => "cancelled",
+			Self::Skipped => "skipped",
+			Self::Neutral => "neutral",
+		}
+	}
+
+	/// A check run's result, from GitHub's status and conclusion for it.
+	pub(crate) fn of_run(status: &str, conclusion: Option<&str>) -> Self {
+		match (status, conclusion) {
+			("COMPLETED", Some("SUCCESS")) => Self::Passed,
+			("COMPLETED", Some("CANCELLED")) => Self::Cancelled,
+			("COMPLETED", Some("SKIPPED")) => Self::Skipped,
+			("COMPLETED", Some("NEUTRAL" | "STALE")) => Self::Neutral,
+			("COMPLETED", _) => Self::Failed,
+			("IN_PROGRESS", _) => Self::Running,
+			_ => Self::Waiting,
+		}
+	}
+
+	/// A status's result, from its state.
+	pub(crate) fn of_status(state: &str) -> Self {
+		match state {
+			"SUCCESS" => Self::Passed,
+			"FAILURE" | "ERROR" => Self::Failed,
+			_ => Self::Waiting,
+		}
+	}
+}
+
 #[cfg(test)]
 mod tests {
 	use super::{Commit, CommitAccount, CommitData, GitAuthor};

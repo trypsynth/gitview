@@ -6,9 +6,9 @@ use ureq::RequestBuilder;
 use crate::{
 	Error,
 	models::{
-		Branch, CloseReason, Comment, Commit, CommitDetails, Email, Issue, IssueState, Notification, Profile,
-		ProfileUpdate, Repository, RepositoryKind, RepositoryOrder, SearchOrder, SocialAccount, StarredOrder,
-		SubjectDetails, User, UserProfile,
+		Branch, Check, CheckResult, CloseReason, Comment, Commit, CommitActivity, CommitDetails, Email, Issue,
+		IssueState, Notification, Profile, ProfileUpdate, PullRequestState, PullRequestSummary, Repository,
+		RepositoryKind, RepositoryOrder, SearchOrder, SocialAccount, StarredOrder, SubjectDetails, User, UserProfile,
 	},
 	page::{At, Connection, Cursor, Kind, Page, link},
 };
@@ -90,9 +90,9 @@ fn restricting_organization(body: &str) -> Option<String> {
 }
 
 #[derive(Serialize)]
-struct GraphRequest<'a> {
+struct GraphRequest<'a, V> {
 	query: &'a str,
-	variables: ConnectionVariables<'a>,
+	variables: V,
 }
 
 #[derive(Serialize)]
@@ -102,8 +102,8 @@ struct ConnectionVariables<'a> {
 }
 
 #[derive(Deserialize)]
-struct GraphResponse<T> {
-	data: Option<UserData<T>>,
+struct GraphResponse<D> {
+	data: Option<D>,
 	#[serde(default)]
 	errors: Vec<GraphError>,
 }
@@ -136,6 +136,93 @@ struct GraphList<T> {
 struct PageInfo {
 	has_next_page: bool,
 	end_cursor: Option<String>,
+}
+
+/// What a commit's pull requests and checks look like in GraphQL.
+const COMMIT_ACTIVITY_QUERY: &str = "query($owner: String!, $name: String!, $oid: GitObjectID!) { \
+	repository(owner: $owner, name: $name) { object(oid: $oid) { ... on Commit { \
+	associatedPullRequests(first: 5) { nodes { number title state url } } \
+	statusCheckRollup { contexts(first: 100) { nodes { __typename \
+	... on CheckRun { name status conclusion startedAt completedAt detailsUrl } \
+	... on StatusContext { context state targetUrl createdAt } } } } } } } }";
+
+#[derive(Serialize)]
+struct CommitVariables<'a> {
+	owner: &'a str,
+	name: &'a str,
+	oid: &'a str,
+}
+
+#[derive(Deserialize)]
+struct RepositoryData {
+	repository: Option<RepositoryObject>,
+}
+
+#[derive(Deserialize)]
+struct RepositoryObject {
+	object: Option<CommitObject>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CommitObject {
+	associated_pull_requests: Option<GraphNodes<PullRequestNode>>,
+	status_check_rollup: Option<Rollup>,
+}
+
+#[derive(Deserialize)]
+struct GraphNodes<T> {
+	nodes: Vec<Option<T>>,
+}
+
+#[derive(Deserialize)]
+struct PullRequestNode {
+	number: u64,
+	title: String,
+	state: String,
+	url: String,
+}
+
+#[derive(Deserialize)]
+struct Rollup {
+	contexts: GraphNodes<CheckNode>,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "__typename")]
+enum CheckNode {
+	#[serde(rename_all = "camelCase")]
+	CheckRun {
+		name: String,
+		status: String,
+		conclusion: Option<String>,
+		started_at: Option<String>,
+		completed_at: Option<String>,
+		details_url: Option<String>,
+	},
+	#[serde(rename_all = "camelCase")]
+	StatusContext { context: String, state: String, target_url: Option<String>, created_at: Option<String> },
+}
+
+impl From<CheckNode> for Check {
+	fn from(node: CheckNode) -> Self {
+		match node {
+			CheckNode::CheckRun { name, status, conclusion, started_at, completed_at, details_url } => Self {
+				result: CheckResult::of_run(&status, conclusion.as_deref()),
+				name,
+				started: started_at,
+				finished: completed_at,
+				url: details_url,
+			},
+			CheckNode::StatusContext { context, state, target_url, created_at } => Self {
+				result: CheckResult::of_status(&state),
+				name: context,
+				started: created_at,
+				finished: None,
+				url: target_url,
+			},
+		}
+	}
 }
 
 pub struct Client {
@@ -355,6 +442,39 @@ impl Client {
 		self.get(&format!("/repos/{repo}/commits/{sha}"))
 	}
 
+	/// The pull requests commit `sha` of `repo` (`owner/name`) is in, and its checks, the ones
+	/// that failed first.
+	pub fn commit_activity(&self, repo: &str, sha: &str) -> Result<CommitActivity, Error> {
+		let (owner, name) = repo.split_once('/').ok_or_else(|| Error::Graph(format!("{repo} isn't owner/name")))?;
+		let data: RepositoryData =
+			self.graphql(COMMIT_ACTIVITY_QUERY, CommitVariables { owner, name, oid: sha }, "commit activity")?;
+		let Some(commit) = data.repository.and_then(|repository| repository.object) else {
+			return Ok(CommitActivity::default());
+		};
+		let pull_requests = commit
+			.associated_pull_requests
+			.map(|list| list.nodes.into_iter().flatten().collect::<Vec<_>>())
+			.unwrap_or_default()
+			.into_iter()
+			.map(|pull| PullRequestSummary {
+				number: pull.number,
+				title: pull.title,
+				state: match pull.state.as_str() {
+					"MERGED" => PullRequestState::Merged,
+					"CLOSED" => PullRequestState::Closed,
+					_ => PullRequestState::Open,
+				},
+				url: pull.url,
+			})
+			.collect();
+		let mut checks: Vec<Check> = commit
+			.status_check_rollup
+			.map(|rollup| rollup.contexts.nodes.into_iter().flatten().map(Check::from).collect())
+			.unwrap_or_default();
+		checks.sort_by_key(|check| check.result);
+		Ok(CommitActivity { pull_requests, checks })
+	}
+
 	/// Issues and pull requests in `repo` (`owner/name`), newest first.
 	pub fn issues(&self, repo: &str, state: IssueState) -> Result<Page<Issue>, Error> {
 		let path =
@@ -508,19 +628,14 @@ impl Client {
 		after: Option<&str>,
 	) -> Result<Page<T>, Error> {
 		let field = connection.field();
-		tracing::debug!(login, field, "fetching from GraphQL");
+
 		let query = format!(
 			"query($login: String!, $after: String) {{ user(login: $login) {{ list: {field}(first: {PAGE_SIZE}, \
 			 after: $after) {{ nodes {{ login name type: __typename }} pageInfo {{ hasNextPage endCursor }} }} }} }}"
 		);
-		let response: GraphResponse<T> = self
-			.authorize(self.agent.post(format!("{API_URL}/graphql")))
-			.send_json(GraphRequest { query: &query, variables: ConnectionVariables { login, after } })?
-			.body_mut()
-			.read_json()?;
-		let Some(list) = response.data.and_then(|data| data.user).map(|user| user.list) else {
-			let message = response.errors.into_iter().next().map(|error| error.message);
-			return Err(Error::Graph(message.unwrap_or_else(|| format!("GitHub has no user {login}"))));
+		let data: UserData<T> = self.graphql(&query, ConnectionVariables { login, after }, field)?;
+		let Some(list) = data.user.map(|user| user.list) else {
+			return Err(Error::Graph(format!("GitHub has no user {login}")));
 		};
 		let next = match list.page_info.end_cursor.filter(|_| list.page_info.has_next_page) {
 			Some(after) => Some(Cursor::graph(connection, login.to_owned(), after)),
@@ -529,6 +644,21 @@ impl Client {
 			None => None,
 		};
 		Ok(Page { items: list.nodes, next })
+	}
+
+	/// Asks GitHub's GraphQL API `query` with `variables`, for the `data` it answers with, or the
+	/// first error it gives instead. `what` names the query in the log.
+	fn graphql<D: DeserializeOwned>(&self, query: &str, variables: impl Serialize, what: &str) -> Result<D, Error> {
+		tracing::debug!(what, "asking GraphQL");
+		let response: GraphResponse<D> = self
+			.authorize(self.agent.post(format!("{API_URL}/graphql")))
+			.send_json(GraphRequest { query, variables })?
+			.body_mut()
+			.read_json()?;
+		response.data.ok_or_else(|| {
+			let message = response.errors.into_iter().next().map(|error| error.message);
+			Error::Graph(message.unwrap_or_else(|| format!("GitHub answered the {what} query with nothing")))
+		})
 	}
 
 	/// One page of a list at `path`, with where the next page is, as GitHub's `Link` header says,
