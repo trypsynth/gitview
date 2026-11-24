@@ -3,14 +3,28 @@ use std::{env, path::PathBuf};
 use shipfitter::{
 	build::{configure_file, embed_commit_info, target_profile_dir},
 	docs::{Page, convert},
+	windows::VersionInfo,
 };
 
 fn main() {
 	println!("cargo:rerun-if-changed=build.rs");
 	// The commit this is built from, which the updater's dev channel compares, and whether it's a
 	// dev build rather than a tagged release.
-	embed_commit_info("GITVIEW");
+	let commit = embed_commit_info("GITVIEW");
 	shipfitter::windows::embed_manifest("Gitview").expect("failed to embed the Windows manifest");
+	// What Explorer's properties, and a screen reader's version key, say about the executable. A
+	// development build says which commit it is.
+	let version = env::var("CARGO_PKG_VERSION").unwrap_or_default();
+	let product_version = commit.is_dev.then(|| format!("{version} ({})", commit.short_hash));
+	let version_info = VersionInfo {
+		product_name: "Gitview",
+		company: "Quin Gillespie",
+		copyright: "Copyright © 2026 Quin Gillespie",
+		original_filename: "gitview.exe",
+		product_version: product_version.as_deref(),
+		..VersionInfo::default()
+	};
+	version_info.embed().expect("failed to embed the version information");
 	// The installer script for `cargo xtask release`, next to the executable it installs, with this
 	// build's version and architecture filled in.
 	let root = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap_or_default()).join("../..");
