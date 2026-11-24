@@ -59,7 +59,11 @@ impl Kind {
 				"{% if repository %}{{ repository }}: #{{ number }} {{ title }}, {{ kind }} by {% else %}#{{ number }} \
 				 {{ title }}, by {% endif %}{{ author }}, {{ comments }}{% if ending %}, {{ ending }}{% endif %}"
 			}
-			Self::Commit => "{{ summary }}, by {{ author }}, {{ time }}, {{ sha }}",
+			// Checks that passed go unsaid, or every commit of a repository with CI would say so.
+			Self::Commit => concat!(
+				"{{ summary }}, by {{ author }}, {{ time }}, {{ sha }}",
+				"{% if checks and checks != \"passed\" %}, checks {{ checks }}{% endif %}",
+			),
 			Self::Person => "{{ login }}{% if organization %}, organization{% endif %}",
 			Self::Post => {
 				"{% if opening %}{{ author }} opened this {{ kind }} on {{ time }}{% else %}{{ author }} commented on {{ \
@@ -158,6 +162,18 @@ mod tests {
 		let post =
 			context! { opening => false, author => "trypsynth", time => "Nov 17, 2026 at 1:00 PM", text => "Done." };
 		assert_eq!(render(Kind::Post, &post), "trypsynth commented on Nov 17, 2026 at 1:00 PM:\nDone.");
+	}
+
+	#[test]
+	fn a_commit_only_mentions_checks_that_have_not_passed() {
+		use_templates(Templates::default());
+		let commit = |checks: &str| {
+			context! { summary => "Fix it", author => "trypsynth", time => "now", sha => "de94f2a", checks }
+		};
+		assert_eq!(render(Kind::Commit, &commit("")), "Fix it, by trypsynth, now, de94f2a");
+		assert_eq!(render(Kind::Commit, &commit("passed")), "Fix it, by trypsynth, now, de94f2a");
+		assert_eq!(render(Kind::Commit, &commit("failed")), "Fix it, by trypsynth, now, de94f2a, checks failed");
+		assert_eq!(render(Kind::Commit, &commit("running")), "Fix it, by trypsynth, now, de94f2a, checks running");
 	}
 
 	#[test]

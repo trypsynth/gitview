@@ -53,6 +53,7 @@ pub fn commit_label(commit: &Commit) -> String {
 		author_name => &commit.commit.author.name,
 		time => local_time(&commit.commit.author.date),
 		sha => commit.short_sha(),
+		checks => commit.checks().unwrap_or_default(),
 	};
 	template::render(Kind::Commit, &context)
 }

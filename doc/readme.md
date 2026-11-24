@@ -145,8 +145,9 @@ Default: `{% if repository %}{{ repository }}: #{{ number }} {{ title }}, {{ kin
 - `author_name`: the author's name from their git settings.
 - `time`: when it was written.
 - `sha`: its short ID, such as `de94f2a`.
+- `checks`: how its checks went altogether: `passed`, `failed`, or `running`. It's empty when it has none.
 
-Default: `{{ summary }}, by {{ author }}, {{ time }}, {{ sha }}`
+Default, which only mentions checks that haven't passed: `{{ summary }}, by {{ author }}, {{ time }}, {{ sha }}{% if checks and checks != "passed" %}, checks {{ checks }}{% endif %}`
 
 ### People
 - `login`: their username.

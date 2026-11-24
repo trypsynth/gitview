@@ -1,4 +1,4 @@
-use std::{fmt::Write, sync::OnceLock, thread, time::Duration};
+use std::{collections::HashMap, fmt::Write, sync::OnceLock, thread, time::Duration};
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use ureq::RequestBuilder;
@@ -199,6 +199,29 @@ fn rollup_checks(rollup: Option<Rollup>) -> Vec<Check> {
 		rollup.map(|rollup| rollup.contexts.nodes.into_iter().flatten().map(Check::from).collect()).unwrap_or_default();
 	checks.sort_by_key(|check| check.result);
 	checks
+}
+
+#[derive(Serialize)]
+struct NameVariables<'a> {
+	owner: &'a str,
+	name: &'a str,
+}
+
+/// Each commit's checks' overall state, under the alias it was asked for by.
+#[derive(Deserialize)]
+struct CheckStates {
+	repository: Option<HashMap<String, Option<CheckStateObject>>>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CheckStateObject {
+	status_check_rollup: Option<RollupState>,
+}
+
+#[derive(Deserialize)]
+struct RollupState {
+	state: String,
 }
 
 #[derive(Serialize)]
@@ -478,7 +501,7 @@ impl Client {
 	/// conflict rather than an empty list.
 	pub fn commits(&self, repo: &str, branch: Option<&str>) -> Result<Page<Commit>, Error> {
 		let on = branch.map(|branch| format!("&sha={}", query_value(branch))).unwrap_or_default();
-		match self.fetch_page(&format!("/repos/{repo}/commits?per_page=100{on}"), Kind::Plain) {
+		match self.fetch_page(&format!("/repos/{repo}/commits?per_page=100{on}"), Kind::Commits) {
 			Err(Error::Http(ureq::Error::StatusCode(409))) => Ok(Page::empty()),
 			result => result,
 		}
@@ -723,6 +746,50 @@ impl Client {
 		Ok(Page { items: list.nodes, next })
 	}
 
+	/// Gives each of a page of commits its checks' overall state, as `gitview_checks`, from one
+	/// GraphQL query for the lot. When that fails, the commits go without.
+	fn add_check_states(&self, commits: &mut [serde_json::Value]) {
+		// Every commit on a page is in the same repository, which its API URL names.
+		let repo = commits
+			.first()
+			.and_then(|commit| commit.get("url")?.as_str()?.strip_prefix(API_URL)?.strip_prefix("/repos/"))
+			.and_then(|rest| rest.split_once("/commits/"))
+			.map(|(repo, _)| repo.to_owned());
+		let Some((owner, name)) = repo.as_deref().and_then(|repo| repo.split_once('/')) else {
+			return;
+		};
+		let mut query =
+			String::from("query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) {");
+		for (index, commit) in commits.iter().enumerate() {
+			// A hash is only ever hex, so it goes into the query as it is.
+			let sha = commit
+				.get("sha")
+				.and_then(serde_json::Value::as_str)
+				.filter(|sha| sha.chars().all(|ch| ch.is_ascii_hexdigit()));
+			if let Some(sha) = sha {
+				let _ = write!(
+					query,
+					" c{index}: object(oid: \"{sha}\") {{ ... on Commit {{ statusCheckRollup {{ state }} }} }}"
+				);
+			}
+		}
+		query.push_str(" } }");
+		let states: CheckStates = match self.graphql(&query, NameVariables { owner, name }, "check states") {
+			Ok(states) => states,
+			Err(error) => {
+				tracing::warn!(%error, "couldn't load the checks of a page of commits");
+				return;
+			}
+		};
+		let mut states = states.repository.unwrap_or_default();
+		for (index, commit) in commits.iter_mut().enumerate() {
+			let state = states.remove(&format!("c{index}")).flatten().and_then(|object| object.status_check_rollup);
+			if let (Some(state), Some(commit)) = (state, commit.as_object_mut()) {
+				commit.insert("gitview_checks".to_owned(), serde_json::Value::String(state.state));
+			}
+		}
+	}
+
 	/// Asks GitHub's GraphQL API `query` with `variables`, for the `data` it answers with, or the
 	/// first error it gives instead. `what` names the query in the log.
 	fn graphql<D: DeserializeOwned>(&self, query: &str, variables: impl Serialize, what: &str) -> Result<D, Error> {
@@ -782,10 +849,14 @@ impl Client {
 		let path_of = |rel| link(links, rel).and_then(|url| url.strip_prefix(API_URL)).map(str::to_owned);
 		let next = path_of(if backwards { "prev" } else { "next" }).map(|path| Cursor::new(path, kind, backwards));
 		let last = path_of("last");
-		let mut items: Vec<T> = if kind == Kind::Search {
-			response.body_mut().read_json::<SearchResults<T>>()?.items
-		} else {
-			response.body_mut().read_json()?
+		let mut items: Vec<T> = match kind {
+			Kind::Search => response.body_mut().read_json::<SearchResults<T>>()?.items,
+			Kind::Commits => {
+				let mut commits: Vec<serde_json::Value> = response.body_mut().read_json()?;
+				self.add_check_states(&mut commits);
+				commits.into_iter().map(serde_json::from_value).collect::<Result<_, _>>()?
+			}
+			Kind::Plain | Kind::Rendered => response.body_mut().read_json()?,
 		};
 		if backwards {
 			items.reverse();

@@ -121,6 +121,10 @@ pub struct Commit {
 	/// The commits this one follows: none for the first commit, two or more for a merge.
 	#[serde(default)]
 	pub parents: Vec<Parent>,
+	/// Its checks' overall state, such as `SUCCESS`, as GraphQL gives it for a list of commits.
+	/// Commits with no checks, and commits fetched another way, have none.
+	#[serde(default, rename = "gitview_checks")]
+	pub check_state: Option<String>,
 }
 
 impl Commit {
@@ -158,6 +162,16 @@ impl Commit {
 	#[must_use]
 	pub fn committer_login(&self) -> Option<&str> {
 		self.committer.as_ref().and_then(|account| account.login.as_deref())
+	}
+
+	/// How its checks went altogether: `passed`, `failed`, or `running`, or `None` without any.
+	#[must_use]
+	pub fn checks(&self) -> Option<&'static str> {
+		match self.check_state.as_deref()? {
+			"SUCCESS" => Some("passed"),
+			"FAILURE" | "ERROR" => Some("failed"),
+			_ => Some("running"),
+		}
 	}
 
 	/// Whether someone other than the author committed it, as GitHub does when merging on its
@@ -642,6 +656,7 @@ mod tests {
 			author: author.map(|login| CommitAccount { login: Some(login.to_owned()) }),
 			committer: author.map(|login| CommitAccount { login: Some(login.to_owned()) }),
 			parents: Vec::new(),
+			check_state: None,
 		}
 	}
 

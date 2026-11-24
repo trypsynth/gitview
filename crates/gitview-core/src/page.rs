@@ -91,6 +91,8 @@ pub enum Kind {
 	Rendered,
 	/// The search endpoint's results, which wrap the array.
 	Search,
+	/// A JSON array of commits, each given its checks' overall state from GraphQL.
+	Commits,
 }
 
 /// The URL a `Link` header gives for `rel`, such as `next` or `last` in

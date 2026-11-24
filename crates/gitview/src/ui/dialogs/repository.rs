@@ -477,6 +477,7 @@ mod tests {
 			author: Some(account("trypsynth")),
 			committer: Some(account("trypsynth")),
 			parents: vec![Parent { sha: "6b55bc7fff91dcb76e32abb482e55b61009729ff".to_owned() }],
+			check_state: None,
 		};
 		assert_eq!(
 			commit_details(&commit),
@@ -502,6 +503,7 @@ mod tests {
 			author: Some(account("AllenDang")),
 			committer: Some(account("web-flow")),
 			parents: vec![Parent { sha: "2772402aaaa".to_owned() }, Parent { sha: "4e73e06bbbb".to_owned() }],
+			check_state: None,
 		};
 		assert_eq!(
 			commit_details(&commit),
