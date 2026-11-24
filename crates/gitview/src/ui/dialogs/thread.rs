@@ -14,7 +14,7 @@ use wxdragon::{
 	utils::{BrowserLaunchFlags, launch_default_browser},
 };
 
-use super::{comment::post_comment, open_on_enter, page::show_page};
+use super::{comment::post_comment, merge::merge_pull_request, open_on_enter, page::show_page};
 use crate::{
 	template,
 	ui::{
@@ -190,6 +190,10 @@ fn show_thread_dialog(
 	list.set_selection(0, true);
 	let posts = Rc::new(RefCell::new(posts));
 	let comment_button = Button::builder(&dialog).with_label("&Comment...").build();
+	// Only for an open pull request the user may merge, which the status says.
+	let mergeable = issue.is_open() && status.is_some_and(|status| status.merge.open && status.merge.allowed);
+	let merge_button = mergeable.then(|| Button::builder(&dialog).with_label("&Merge...").build());
+	let merge_target = (Arc::clone(&client), repo.clone());
 	// A pull request's checks, each with its link, on a page of their own.
 	let checks = status.map(|status| status.checks.clone()).filter(|checks| !checks.is_empty());
 	let checks_button = checks.map(|checks| {
@@ -238,6 +242,24 @@ fn show_thread_dialog(
 	bind_post_menu(list, live_region, selected_post, open_post, reply);
 	let button_row = BoxSizer::builder(Orientation::Horizontal).build();
 	button_row.add(&comment_button, 0, SizerFlag::empty(), 0);
+	if let Some(merge_button) = merge_button {
+		button_row.add(&merge_button, 0, SizerFlag::Left, padding);
+		let (client, repo) = merge_target;
+		let comments = comment_count(issue.comments);
+		merge_button.on_click(move |_| {
+			merge_pull_request(dialog, Arc::clone(&client), repo.clone(), number, {
+				let comments = comments.clone();
+				move || {
+					// The thread now reads as merged, and has nothing left to merge.
+					label.set_label(&format!("&Thread. Pull request merged, {comments}."));
+					merge_button.show(false);
+					dialog.layout();
+					list.set_focus();
+					live_region::announce(live_region, "Pull request merged.");
+				}
+			});
+		});
+	}
 	if let Some(checks_button) = &checks_button {
 		button_row.add(checks_button, 0, SizerFlag::Left, padding);
 	}

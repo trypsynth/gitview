@@ -76,6 +76,9 @@ pub struct ProfileUpdate {
 pub struct Email {
 	pub email: String,
 	pub verified: bool,
+	/// Whether it's the address GitHub uses for the account, such as for its own commits.
+	#[serde(default)]
+	pub primary: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -577,6 +580,78 @@ pub struct PullRequestStatus {
 	/// Whether it conflicts with the branch it would merge into.
 	pub conflicts: bool,
 	pub checks: Vec<Check>,
+	/// What merging it takes and allows.
+	pub merge: MergeInfo,
+}
+
+/// What merging a pull request takes and allows.
+#[derive(Debug, Clone, Default)]
+pub struct MergeInfo {
+	/// Whether it's still open, and so can be merged at all.
+	pub open: bool,
+	/// Whether the signed-in user may merge into its repository.
+	pub allowed: bool,
+	/// The ways its repository lets pull requests merge, in GitHub's order.
+	pub methods: Vec<MergeMethod>,
+	pub title: String,
+	/// GitHub's ID for it, which merging names it by.
+	pub id: String,
+	/// Who owns the repository its branch is in, which can be a fork's.
+	pub head_owner: String,
+	/// The branch it would merge, and the hash of that branch's newest commit, which merging is
+	/// pinned to.
+	pub head_branch: String,
+	pub head_sha: String,
+	/// Whether that branch is in another repository, such as a fork, which merging can't delete.
+	pub from_fork: bool,
+}
+
+/// The merge commit's title, message and email, each GitHub's own when `None`.
+#[derive(Debug, Clone, Default)]
+pub struct MergeCommit {
+	pub title: Option<String>,
+	pub message: Option<String>,
+	pub email: Option<String>,
+}
+
+/// How a pull request's commits reach the branch it merges into.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MergeMethod {
+	/// A merge commit joining the branch in.
+	Merge,
+	/// One commit with all its changes.
+	Squash,
+	/// Its commits replayed one by one.
+	Rebase,
+}
+
+impl MergeMethod {
+	/// What GitHub's GraphQL API calls it.
+	#[must_use]
+	pub const fn as_parameter(self) -> &'static str {
+		match self {
+			Self::Merge => "MERGE",
+			Self::Squash => "SQUASH",
+			Self::Rebase => "REBASE",
+		}
+	}
+
+	/// What GitHub's merge button calls it.
+	#[must_use]
+	pub const fn label(self) -> &'static str {
+		match self {
+			Self::Merge => "Create a merge commit",
+			Self::Squash => "Squash and merge",
+			Self::Rebase => "Rebase and merge",
+		}
+	}
+
+	/// Whether it makes a commit of its own, which can have a title and message. A rebase
+	/// doesn't.
+	#[must_use]
+	pub const fn makes_a_commit(self) -> bool {
+		!matches!(self, Self::Rebase)
+	}
 }
 
 /// What a pull request's reviews add up to, when its repository asks for reviews.

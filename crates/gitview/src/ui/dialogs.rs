@@ -1,4 +1,5 @@
 mod comment;
+mod merge;
 mod page;
 mod profile;
 mod repository;
@@ -9,6 +10,7 @@ mod thread;
 mod user;
 
 pub use comment::post_comment;
+pub use merge::merge_pull_request;
 pub use page::open_subject;
 pub use profile::edit_profile;
 pub use repository::open_repository;

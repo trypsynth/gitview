@@ -50,6 +50,7 @@ To change the order of the views, select one and press `Shift+Up` or `Shift+Down
 - Open, which is `Enter`.
 - Comment, on an issue or pull request.
 - Close, as completed, as not planned, or as a duplicate of another issue. A pull request closes without merging.
+- Merge, on an open pull request.
 - Reopen.
 - Mark as read, Mark as done, and Unsubscribe, on a notification.
 - Star or unstar, and watch or unwatch, on a repository.
@@ -87,6 +88,7 @@ The context key and `Shift+F10` show the same actions as a menu, with Open first
 - A thread lists the issue or pull request first, then its comments, oldest first.
 - The list's name says whether it's open, closed, or merged, and how many comments it has. For a pull request it also says whether it's a draft, its review, such as `Approved` or `Changes requested`, whether it has conflicts, and how many of its checks passed.
 - On a pull request with checks, the `Checks...` button lists each check on its newest commit, failures first, with how long it took. A check's name opens its page in your browser.
+- On an open pull request you can merge, the `Merge...` button merges it. `Merge...` in the `Actions` menu does the same from the main window. Choose the merge method the repository allows, and change the commit's title, message, and email if you want. You can also delete the branch afterwards, when it isn't in a fork. Gitview says why when a pull request can't merge, such as a draft, conflicts, or a check that has to pass first. It only merges the commits you saw, so a push after you opened the dialog stops the merge.
 - `Enter` on a post shows it formatted.
 - The context menu of a post has `Reply with quote...`, `Copy text`, `Copy link`, and `Open in browser`.
 - The `Comment...` button adds a comment. `Ctrl+Enter` posts it.
@@ -184,7 +186,7 @@ To change a key, use `File -> Customize Keyboard Shortcuts...`. The Main window 
 - `Ctrl+Shift+E`: Edit profile.
 - `Ctrl+Alt+G`, in any program: Show or hide Gitview.
 
-These have no key until you give them one: the close actions, Reopen, Mark as read, Unsubscribe, Star or unstar, Watch or unwatch, Customize keyboard shortcuts, Sign out, and Check for updates.
+These have no key until you give them one: the close actions, Reopen, Merge, Mark as read, Unsubscribe, Star or unstar, Watch or unwatch, Customize keyboard shortcuts, Sign out, and Check for updates.
 
 ## Hiding and the Tray
 - The global shortcut, `Ctrl+Alt+G` by default, hides Gitview when you're in it and brings it back from anywhere. A dialog that is open hides and comes back with it.

@@ -1276,21 +1276,8 @@ impl MainWindow {
 		};
 		match action {
 			Action::Open => self.open_item(client, &selected),
-			Action::Comment => {
-				let Some((repo, number)) = selected.issue() else {
-					return;
-				};
-				// Who opened it is the one person known to be in the thread.
-				let people = match &selected {
-					Selected::Issue(issue) => vec![issue.user.login.clone()],
-					_ => Vec::new(),
-				};
-				let window = self.clone();
-				dialogs::post_comment(self.frame, client, repo, number, "", people, move |_| {
-					window.state.borrow_mut().announcement = Some("Comment posted.".to_owned());
-					window.fetch_all();
-				});
-			}
+			Action::Merge => self.merge(client, &selected),
+			Action::Comment => self.comment(client, &selected),
 			Action::CloseCompleted | Action::CloseNotPlanned | Action::ClosePullRequest | Action::Reopen => {
 				let Some((repo, number)) = selected.issue() else {
 					return;
@@ -1492,6 +1479,35 @@ impl MainWindow {
 			return;
 		};
 		dialogs::open_user(self.frame, client, login);
+	}
+
+	/// Asks for a comment on the selected issue or pull request, and posts it.
+	fn comment(&self, client: Arc<Client>, selected: &Selected) {
+		let Some((repo, number)) = selected.issue() else {
+			return;
+		};
+		// Who opened it is the one person known to be in the thread.
+		let people = match &selected {
+			Selected::Issue(issue) => vec![issue.user.login.clone()],
+			_ => Vec::new(),
+		};
+		let window = self.clone();
+		dialogs::post_comment(self.frame, client, repo, number, "", people, move |_| {
+			window.state.borrow_mut().announcement = Some("Comment posted.".to_owned());
+			window.fetch_all();
+		});
+	}
+
+	/// Merges the selected pull request, after asking how, then says so once the views reload.
+	fn merge(&self, client: Arc<Client>, selected: &Selected) {
+		let Some((repo, number)) = selected.issue() else {
+			return;
+		};
+		let window = self.clone();
+		dialogs::merge_pull_request(self.frame, client, repo, number, move || {
+			window.state.borrow_mut().announcement = Some("Pull request merged.".to_owned());
+			window.fetch_all();
+		});
 	}
 
 	fn close_as_duplicate(&self, client: Arc<Client>, selected: &Selected) {

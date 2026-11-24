@@ -7,9 +7,9 @@ use crate::{
 	Error,
 	models::{
 		Branch, Check, CheckResult, CloseReason, Comment, Commit, CommitActivity, CommitDetails, Email, Issue,
-		IssueKind, IssueState, Notification, Profile, ProfileUpdate, PullRequestState, PullRequestStatus,
-		PullRequestSummary, Repository, RepositoryKind, RepositoryOrder, ReviewDecision, SearchOrder, SocialAccount,
-		StarredOrder, SubjectDetails, User, UserProfile,
+		IssueKind, IssueState, MergeCommit, MergeInfo, MergeMethod, Notification, Profile, ProfileUpdate,
+		PullRequestState, PullRequestStatus, PullRequestSummary, Repository, RepositoryKind, RepositoryOrder,
+		ReviewDecision, SearchOrder, SocialAccount, StarredOrder, SubjectDetails, User, UserProfile,
 	},
 	page::{At, Connection, Cursor, Kind, Page, link},
 };
@@ -71,6 +71,18 @@ fn query_value(text: &str) -> String {
 		}
 	}
 	encoded
+}
+
+/// Nothing when `response` succeeded, or the reason GitHub gave for refusing it.
+fn refusal(response: &mut ureq::http::Response<ureq::Body>) -> Result<(), Error> {
+	let status = response.status();
+	if status.is_success() {
+		return Ok(());
+	}
+	match response.body_mut().read_json::<Refusal>() {
+		Ok(refusal) if status.as_u16() != 401 => Err(Error::Refused(refusal.message)),
+		_ => Err(ureq::Error::StatusCode(status.as_u16()).into()),
+	}
 }
 
 /// The organization a 403's body names, when it refused because the organization limits what
@@ -149,7 +161,9 @@ const COMMIT_ACTIVITY_QUERY: &str = "query($owner: String!, $name: String!, $oid
 
 /// What a pull request's state and its newest commit's checks look like in GraphQL.
 const PULL_REQUEST_STATUS_QUERY: &str = "query($owner: String!, $name: String!, $number: Int!) { \
-	repository(owner: $owner, name: $name) { pullRequest(number: $number) { isDraft reviewDecision mergeable \
+	repository(owner: $owner, name: $name) { viewerPermission mergeCommitAllowed squashMergeAllowed \
+	rebaseMergeAllowed pullRequest(number: $number) { id isDraft reviewDecision mergeable state title headRefName \
+	headRefOid isCrossRepository headRepositoryOwner { login } \
 	commits(last: 1) { nodes { commit { statusCheckRollup { contexts(first: 100) { nodes { __typename \
 	... on CheckRun { name status conclusion startedAt completedAt detailsUrl } \
 	... on StatusContext { context state targetUrl createdAt } } } } } } } } } }";
@@ -171,15 +185,68 @@ struct PullRequestRepository {
 #[serde(rename_all = "camelCase")]
 struct PullRequestHolder {
 	pull_request: Option<PullRequestNodeStatus>,
+	viewer_permission: Option<String>,
+	merge_commit_allowed: bool,
+	squash_merge_allowed: bool,
+	rebase_merge_allowed: bool,
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PullRequestNodeStatus {
+	id: String,
 	is_draft: bool,
 	review_decision: Option<String>,
 	mergeable: String,
+	state: String,
+	title: String,
+	head_ref_name: String,
+	head_ref_oid: String,
+	is_cross_repository: bool,
+	head_repository_owner: Option<Owner>,
 	commits: GraphNodes<PullRequestCommit>,
+}
+
+/// What a merge asks of GitHub. Without a title or message, GitHub writes its own.
+/// Merging a pull request, in GraphQL, which unlike REST can name the commit's email.
+const MERGE_MUTATION: &str = "mutation($input: MergePullRequestInput!) { \
+	mergePullRequest(input: $input) { pullRequest { merged } } }";
+
+#[derive(Serialize)]
+struct MergeVariables<'a> {
+	input: MergeInput<'a>,
+}
+
+/// What a merge asks of GitHub. Without a title, message or email, GitHub uses its own.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MergeInput<'a> {
+	pull_request_id: &'a str,
+	merge_method: &'a str,
+	expected_head_oid: &'a str,
+	#[serde(skip_serializing_if = "Option::is_none")]
+	commit_headline: Option<&'a str>,
+	#[serde(skip_serializing_if = "Option::is_none")]
+	commit_body: Option<&'a str>,
+	#[serde(skip_serializing_if = "Option::is_none")]
+	author_email: Option<&'a str>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MergeData {
+	merge_pull_request: Option<serde_json::Value>,
+}
+
+#[derive(Deserialize)]
+struct Owner {
+	login: String,
+}
+
+/// The reason GitHub gives with a refusal.
+#[derive(Deserialize)]
+struct Refusal {
+	message: String,
 }
 
 #[derive(Deserialize)]
@@ -557,7 +624,20 @@ impl Client {
 			PullRequestVariables { owner, name, number },
 			"pull request status",
 		)?;
-		let Some(pull) = data.repository.and_then(|repository| repository.pull_request) else {
+		let Some(repository) = data.repository else {
+			return Ok(PullRequestStatus::default());
+		};
+		// Merging needs write access; triage and read can't.
+		let allowed = matches!(repository.viewer_permission.as_deref(), Some("WRITE" | "MAINTAIN" | "ADMIN"));
+		let methods = [
+			(repository.merge_commit_allowed, MergeMethod::Merge),
+			(repository.squash_merge_allowed, MergeMethod::Squash),
+			(repository.rebase_merge_allowed, MergeMethod::Rebase),
+		]
+		.into_iter()
+		.filter_map(|(allowed, method)| allowed.then_some(method))
+		.collect();
+		let Some(pull) = repository.pull_request else {
 			return Ok(PullRequestStatus::default());
 		};
 		let review = match pull.review_decision.as_deref() {
@@ -572,7 +652,54 @@ impl Client {
 			review,
 			conflicts: pull.mergeable == "CONFLICTING",
 			checks: rollup_checks(newest.and_then(|newest| newest.commit.status_check_rollup)),
+			merge: MergeInfo {
+				open: pull.state == "OPEN",
+				allowed,
+				methods,
+				title: pull.title,
+				id: pull.id,
+				head_owner: pull.head_repository_owner.map(|owner| owner.login).unwrap_or_default(),
+				head_branch: pull.head_ref_name,
+				head_sha: pull.head_ref_oid,
+				from_fork: pull.is_cross_repository,
+			},
 		})
+	}
+
+	/// Merges the pull request `merge` describes by `method`, but only if its branch's newest
+	/// commit is still the one `merge` saw, so nothing pushed since slips in unseen. `commit` is
+	/// the merge commit's title, message and email, each GitHub's own when `None`. When GitHub
+	/// refuses, the error says why, such as that a required check hasn't passed.
+	pub fn merge_pull_request(
+		&self,
+		merge: &MergeInfo,
+		method: MergeMethod,
+		commit: &MergeCommit,
+	) -> Result<(), Error> {
+		tracing::info!(branch = merge.head_branch, method = method.as_parameter(), "merging a pull request");
+		let input = MergeInput {
+			pull_request_id: &merge.id,
+			merge_method: method.as_parameter(),
+			expected_head_oid: &merge.head_sha,
+			commit_headline: commit.title.as_deref(),
+			commit_body: commit.message.as_deref(),
+			author_email: commit.email.as_deref(),
+		};
+		let merged: MergeData = self.graphql(MERGE_MUTATION, MergeVariables { input }, "merge")?;
+		match merged.merge_pull_request {
+			Some(_) => Ok(()),
+			None => Err(Error::Refused("GitHub didn't merge the pull request.".to_owned())),
+		}
+	}
+
+	/// Deletes branch `branch` of `repo` (`owner/name`), as after merging it.
+	pub fn delete_branch(&self, repo: &str, branch: &str) -> Result<(), Error> {
+		// A branch name can hold slashes, which stay as they are; anything else odd is encoded.
+		let path: Vec<String> = branch.split('/').map(query_value).collect();
+		let url = format!("{API_URL}/repos/{repo}/git/refs/heads/{}", path.join("/"));
+		let mut response =
+			self.authorize(self.agent.delete(url)).config().http_status_as_error(false).build().call()?;
+		refusal(&mut response)
 	}
 
 	/// Issues and pull requests in `repo` (`owner/name`), newest first.

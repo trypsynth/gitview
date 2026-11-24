@@ -28,7 +28,7 @@ pub enum Command {
 
 impl Command {
 	/// Every command, in the order Customize Keyboard Shortcuts lists them.
-	pub const ALL: [Self; 26] = [
+	pub const ALL: [Self; 27] = [
 		Self::Item(Action::Open),
 		Self::Item(Action::Comment),
 		Self::Item(Action::CloseCompleted),
@@ -36,6 +36,7 @@ impl Command {
 		Self::Item(Action::CloseDuplicate),
 		Self::Item(Action::ClosePullRequest),
 		Self::Item(Action::Reopen),
+		Self::Item(Action::Merge),
 		Self::Item(Action::MarkRead),
 		Self::Item(Action::MarkDone),
 		Self::Item(Action::Unsubscribe),
@@ -68,6 +69,7 @@ impl Command {
 				Action::CloseDuplicate => "close_duplicate",
 				Action::ClosePullRequest => "close_pull_request",
 				Action::Reopen => "reopen",
+				Action::Merge => "merge",
 				Action::MarkRead => "mark_read",
 				Action::MarkDone => "mark_done",
 				Action::Unsubscribe => "unsubscribe",
@@ -102,6 +104,7 @@ impl Command {
 				Action::CloseDuplicate => "Close as duplicate",
 				Action::ClosePullRequest => "Close pull request",
 				Action::Reopen => "Reopen",
+				Action::Merge => "Merge",
 				Action::MarkRead => "Mark as read",
 				Action::MarkDone => "Mark as done",
 				Action::Unsubscribe => "Unsubscribe",

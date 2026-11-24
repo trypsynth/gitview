@@ -49,6 +49,7 @@ pub enum Action {
 	CloseDuplicate,
 	ClosePullRequest,
 	Reopen,
+	Merge,
 	MarkRead,
 	MarkDone,
 	Unsubscribe,
@@ -62,7 +63,7 @@ pub enum Action {
 }
 
 impl Action {
-	const ALL: [Self; 17] = [
+	const ALL: [Self; 18] = [
 		Self::Open,
 		Self::Comment,
 		Self::CloseCompleted,
@@ -70,6 +71,7 @@ impl Action {
 		Self::CloseDuplicate,
 		Self::ClosePullRequest,
 		Self::Reopen,
+		Self::Merge,
 		Self::MarkRead,
 		Self::MarkDone,
 		Self::Unsubscribe,
@@ -99,6 +101,7 @@ impl Action {
 			Self::CloseDuplicate => "&Duplicate of...",
 			Self::ClosePullRequest => "Clo&se",
 			Self::Reopen => "R&eopen",
+			Self::Merge => "&Merge...",
 			Self::MarkRead => "Mark as &read",
 			Self::MarkDone => "Mark as &done",
 			Self::Unsubscribe => "&Unsubscribe",
@@ -121,6 +124,7 @@ impl Action {
 			Self::CloseDuplicate => "Close as a copy of another issue",
 			Self::ClosePullRequest => "Close without merging",
 			Self::Reopen => "Open again",
+			Self::Merge => "Merge the pull request",
 			Self::MarkRead => "Mark the notification as read",
 			Self::MarkDone => "Remove the notification from your inbox",
 			Self::Unsubscribe => "Stop notifications for this thread",
@@ -168,6 +172,10 @@ fn entries(selected: &Selected, marks: Marks) -> Vec<Entry> {
 		// A notification does not say whether its issue is open, so it offers both.
 		match selected {
 			Selected::Issue(issue) if !issue.is_open() => entries.push(Entry::Action(Action::Reopen)),
+			// Whether the user may merge it is asked when they try, since only GitHub knows.
+			Selected::Issue(issue) if issue.is_pull_request() => {
+				entries.extend([Entry::Action(Action::Merge), close]);
+			}
 			Selected::Issue(_) => entries.push(close),
 			_ => entries.extend([close, Entry::Action(Action::Reopen)]),
 		}

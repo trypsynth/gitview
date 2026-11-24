@@ -21,6 +21,9 @@ pub enum Error {
 	Graph(String),
 	#[error(transparent)]
 	Json(#[from] serde_json::Error),
+	/// GitHub refused what was asked, and said why, such as that a pull request can't merge.
+	#[error("{0}")]
+	Refused(String),
 	/// The organization limits what third-party apps can see, and hasn't approved Gitview.
 	#[error("{0} only lets apps it has approved see this")]
 	Restricted(String),
