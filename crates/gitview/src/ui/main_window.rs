@@ -1244,8 +1244,13 @@ impl MainWindow {
 				let Some((repo, number)) = selected.issue() else {
 					return;
 				};
+				// Who opened it is the one person known to be in the thread.
+				let people = match &selected {
+					Selected::Issue(issue) => vec![issue.user.login.clone()],
+					_ => Vec::new(),
+				};
 				let window = self.clone();
-				dialogs::post_comment(self.frame, client, repo, number, "", move |_| {
+				dialogs::post_comment(self.frame, client, repo, number, "", people, move |_| {
 					window.state.borrow_mut().announcement = Some("Comment posted.".to_owned());
 					window.fetch_all();
 				});
@@ -1419,7 +1424,7 @@ impl MainWindow {
 			let lookup = background_blocking(move || {
 				let owner = match owner {
 					Some(owner) => owner,
-					None => lookup_client.current_user().map_err(|error| (None, error))?.login,
+					None => lookup_client.login().map_err(|error| (None, error))?,
 				};
 				let repo = format!("{owner}/{name}");
 				lookup_client.repository(&repo).map_err(|error| (Some(repo), error))

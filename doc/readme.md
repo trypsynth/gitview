@@ -85,6 +85,7 @@ In the repository and user dialogs, `Ctrl+C`, `Ctrl+Shift+C`, and `Ctrl+B` copy 
 - `Enter` on a post shows it formatted.
 - The context menu of a post has `Reply with quote...`, `Copy text`, `Copy link`, and `Open in browser`.
 - The `Comment...` button adds a comment. `Ctrl+Enter` posts it.
+- In a comment, `@` suggests people to mention: the people in the thread first, then the people GitHub finds as you type. `Up` and `Down` choose one, `Enter` or `Tab` adds it, and `Escape` closes the list. `Ctrl+Space` shows the list again.
 
 ## Your Profile
 `File -> Edit Profile...` changes your public GitHub profile: name, bio, website, company, location, and whether you're available for hire.

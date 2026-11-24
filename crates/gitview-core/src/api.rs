@@ -1,4 +1,4 @@
-use std::{fmt::Write, thread, time::Duration};
+use std::{fmt::Write, sync::OnceLock, thread, time::Duration};
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use ureq::RequestBuilder;
@@ -141,17 +141,39 @@ struct PageInfo {
 pub struct Client {
 	agent: ureq::Agent,
 	token: String,
+	/// The signed-in user's login, once asked for.
+	login: OnceLock<String>,
 }
 
 impl Client {
 	#[must_use]
 	pub fn new(token: String) -> Self {
 		let agent = ureq::Agent::config_builder().user_agent(USER_AGENT).build().into();
-		Self { agent, token }
+		Self { agent, token, login: OnceLock::new() }
 	}
 
 	pub fn current_user(&self) -> Result<User, Error> {
 		self.get("/user")
+	}
+
+	/// The signed-in user's login, asked for once and then remembered.
+	pub fn login(&self) -> Result<String, Error> {
+		if let Some(login) = self.login.get() {
+			return Ok(login.clone());
+		}
+		let login = self.current_user()?.login;
+		Ok(self.login.get_or_init(|| login).clone())
+	}
+
+	/// Up to 10 people and organizations whose login matches `query`, best match first.
+	pub fn search_users(&self, query: &str) -> Result<Vec<User>, Error> {
+		// A login is letters, digits and hyphens, so anything else can only fail to match, and
+		// what's left needs no escaping.
+		let query: String = query.chars().filter(|ch| ch.is_ascii_alphanumeric() || *ch == '-').collect();
+		if query.is_empty() {
+			return Ok(Vec::new());
+		}
+		Ok(self.fetch_page(&format!("/search/users?q={query}+in:login&per_page=10"), Kind::Search)?.items)
 	}
 
 	/// The signed-in user's profile. Fails with [`Error::NeedsProfileAccess`] when the sign-in

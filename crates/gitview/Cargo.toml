@@ -23,6 +23,7 @@ ship-shape = "0.6.1"
 toml = "1.2.2"
 tracing = "0.1.44"
 wx-utils = { version = "0.5.3", features = ["global-hotkeys", "shortcuts", "tasks", "tray"] }
+wordsmith = "0.1.0"
 wxdragon = { version = "0.9.25", features = ["webview"] }
 
 [build-dependencies]

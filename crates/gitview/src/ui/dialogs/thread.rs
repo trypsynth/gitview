@@ -184,9 +184,13 @@ fn show_thread_dialog(parent: &dyn WxWidget, client: Arc<Client>, repo: String, 
 			}
 		}
 	};
+	// Who to suggest after "@": the people who commented, the most recent first, then who opened it.
+	let people: Rc<[String]> =
+		comments.iter().rev().map(|comment| &comment.user.login).chain([&issue.user.login]).cloned().collect();
 	let reply = move |initial: String| {
 		let posts = Rc::clone(&posts);
-		post_comment(dialog, Arc::clone(&client), repo.clone(), number, &initial, move |comment| {
+		let people = people.to_vec();
+		post_comment(dialog, Arc::clone(&client), repo.clone(), number, &initial, people, move |comment| {
 			let post = Post::of_comment(&comment);
 			// The newest post goes at the end of the conversation.
 			list.append(&post.label);
