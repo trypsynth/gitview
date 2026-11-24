@@ -1,4 +1,13 @@
-use std::{collections::HashMap, fmt::Write, sync::OnceLock, thread, time::Duration};
+use std::{
+	collections::HashMap,
+	fmt::Write as _,
+	fs,
+	io::{self, Read, Write},
+	path::{Path, PathBuf},
+	sync::OnceLock,
+	thread,
+	time::Duration,
+};
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use ureq::RequestBuilder;
@@ -8,7 +17,7 @@ use crate::{
 	models::{
 		Branch, Check, CheckResult, CloseReason, Comment, Commit, CommitActivity, CommitDetails, Email, Issue,
 		IssueKind, IssueState, MergeCommit, MergeInfo, MergeMethod, Notification, Profile, ProfileUpdate,
-		PullRequestState, PullRequestStatus, PullRequestSummary, Repository, RepositoryKind, RepositoryOrder,
+		PullRequestState, PullRequestStatus, PullRequestSummary, Release, Repository, RepositoryKind, RepositoryOrder,
 		ReviewDecision, SearchOrder, SocialAccount, StarredOrder, SubjectDetails, User, UserProfile,
 	},
 	page::{At, Connection, Cursor, Kind, Page, link},
@@ -71,6 +80,31 @@ fn query_value(text: &str) -> String {
 		}
 	}
 	encoded
+}
+
+/// Writes what `reader` reads to a new file at `path`, telling `progress` how much has arrived
+/// after each piece. Returns whether it got to the end, rather than being stopped.
+fn copy_with_progress(
+	mut reader: impl Read,
+	path: &Path,
+	total: Option<u64>,
+	progress: &mut impl FnMut(u64, Option<u64>) -> bool,
+) -> io::Result<bool> {
+	let mut file = fs::File::create(path)?;
+	let mut buffer = vec![0; 64 * 1024];
+	let mut written = 0u64;
+	loop {
+		let read = reader.read(&mut buffer)?;
+		if read == 0 {
+			file.flush()?;
+			return Ok(true);
+		}
+		file.write_all(&buffer[..read])?;
+		written += read as u64;
+		if !progress(written, total) {
+			return Ok(false);
+		}
+	}
 }
 
 /// Nothing when `response` succeeded, or the reason GitHub gave for refusing it.
@@ -700,6 +734,65 @@ impl Client {
 		let mut response =
 			self.authorize(self.agent.delete(url)).config().http_status_as_error(false).build().call()?;
 		refusal(&mut response)
+	}
+
+	/// The releases of `repo` (`owner/name`), newest first.
+	pub fn releases(&self, repo: &str) -> Result<Page<Release>, Error> {
+		self.fetch_page(&format!("/repos/{repo}/releases?per_page=100"), Kind::Rendered)
+	}
+
+	/// Release `id` of `repo` (`owner/name`), as it is now.
+	pub fn release(&self, repo: &str, id: u64) -> Result<Release, Error> {
+		self.get_rendered(&format!("/repos/{repo}/releases/{id}"))
+	}
+
+	/// Downloads the file at `url`, an address in GitHub's API such as an asset's, to `path`.
+	/// `progress` hears how much has arrived, and of how much when GitHub says, and stops the
+	/// download by returning `false`. Returns whether it finished. The file is written beside
+	/// `path` first and only takes its name once complete, so a stopped or failed download leaves
+	/// nothing half written.
+	pub fn download(
+		&self,
+		url: &str,
+		path: &Path,
+		mut progress: impl FnMut(u64, Option<u64>) -> bool,
+	) -> Result<bool, Error> {
+		// Only ever the API, so the sign-in never goes anywhere else. Its downloads redirect to
+		// storage elsewhere, and the sign-in isn't sent on there.
+		if !url.starts_with(API_URL) {
+			return Err(Error::NotGitHub);
+		}
+		tracing::info!(url, "downloading");
+		// An asset gives its file only when asked for one; source archives refuse to be asked.
+		let accept =
+			if url.contains("/releases/assets/") { "application/octet-stream" } else { "application/vnd.github+json" };
+		let response = self.authorize(self.agent.get(url)).header("Accept", accept).call()?;
+		let total =
+			response.headers().get("Content-Length").and_then(|length| length.to_str().ok()?.parse::<u64>().ok());
+		let mut partial = path.as_os_str().to_owned();
+		partial.push(".part");
+		let partial = PathBuf::from(partial);
+		let result = copy_with_progress(
+			response.into_body().into_with_config().limit(u64::MAX).reader(),
+			&partial,
+			total,
+			&mut progress,
+		);
+		match result {
+			Ok(true) => {
+				fs::rename(&partial, path)
+					.map_err(|error| Error::Refused(format!("Couldn't save the file: {error}")))?;
+				Ok(true)
+			}
+			Ok(false) => {
+				let _ = fs::remove_file(&partial);
+				Ok(false)
+			}
+			Err(error) => {
+				let _ = fs::remove_file(&partial);
+				Err(Error::Refused(format!("The download failed: {error}")))
+			}
+		}
 	}
 
 	/// Issues and pull requests in `repo` (`owner/name`), newest first.

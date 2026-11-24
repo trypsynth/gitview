@@ -125,6 +125,26 @@ pub fn duration(started: &str, finished: &str) -> Option<String> {
 	})
 }
 
+/// A file's size as people say it, such as "309 bytes", "12.4 KB" or "4.9 MB".
+pub fn file_size(bytes: u64) -> String {
+	const UNITS: [&str; 4] = ["KB", "MB", "GB", "TB"];
+	if bytes < 1024 {
+		return count(bytes, "byte", "bytes");
+	}
+	// Shown to one place, so the rounding of a float is all the precision there is.
+	#[allow(clippy::cast_precision_loss)]
+	let mut size = bytes as f64 / 1024.0;
+	let mut unit = UNITS[0];
+	for next in &UNITS[1..] {
+		if size < 1024.0 {
+			break;
+		}
+		size /= 1024.0;
+		unit = next;
+	}
+	format!("{size:.1} {unit}")
+}
+
 /// GitHub's own rendering of a body when the request asked for it, the raw markdown otherwise.
 pub fn body_html(html: Option<&str>, markdown: Option<&str>) -> String {
 	if let Some(html) = html.map(str::trim).filter(|html| !html.is_empty()) {

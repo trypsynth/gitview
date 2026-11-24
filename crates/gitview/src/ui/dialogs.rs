@@ -2,6 +2,7 @@ mod comment;
 mod merge;
 mod page;
 mod profile;
+mod release;
 mod repository;
 mod settings;
 mod shortcuts;

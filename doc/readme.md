@@ -63,6 +63,7 @@ To change the order of the views, select one and press `Shift+Up` or `Shift+Down
 - Commits, from the branch chosen in `Branch`. `Enter` on a commit shows its message, its details, and the files it changed. The details are its full SHA, its author, its committer when that is someone else, its parents, whether its signature is verified, the pull requests it's in, and how many of its checks passed. A Checks section lists each check, failures first, with how long it took. A check's name opens its page in your browser.
 - Issues and Pull requests that are open.
 - Closed issues and Closed pull requests. Gitview loads these the first time you choose them.
+- Releases, newest first. Gitview loads these the first time you choose them. `Enter` on a release lists its files, then its source code as a zip and a tar.gz. `Enter` or `Download...` on a file asks where to save it, then downloads it with a progress bar. `Release notes` shows what the release says.
 
 `Enter` on an issue or pull request opens its thread.
 

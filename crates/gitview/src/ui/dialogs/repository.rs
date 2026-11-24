@@ -10,7 +10,7 @@ use std::{
 
 use gitview_core::{
 	Client, Error,
-	models::{ChangedFile, Commit, CommitActivity, CommitDetails, Issue, IssueState, Parent},
+	models::{ChangedFile, Commit, CommitActivity, CommitDetails, Issue, IssueState, Parent, Release},
 };
 use wx_utils::{
 	dialog_padding,
@@ -18,9 +18,13 @@ use wx_utils::{
 };
 use wxdragon::prelude::*;
 
-use super::{open_issue, page::show_page};
+use super::{
+	open_issue,
+	page::show_page,
+	release::{open_release, release_link, release_row},
+};
 use crate::{
-	config,
+	config::{self, Lists},
 	ui::{
 		feed::{self, Feed, FeedSection, RowActions, Shared},
 		live, notice,
@@ -41,6 +45,7 @@ enum Section {
 	PullRequests,
 	ClosedIssues,
 	ClosedPullRequests,
+	Releases,
 }
 
 impl FeedSection for Section {
@@ -51,6 +56,7 @@ impl FeedSection for Section {
 			Self::PullRequests => "Pull requests",
 			Self::ClosedIssues => "Closed issues",
 			Self::ClosedPullRequests => "Closed pull requests",
+			Self::Releases => "Releases",
 		}
 	}
 
@@ -61,18 +67,19 @@ impl FeedSection for Section {
 			Self::PullRequests => "No open pull requests.",
 			Self::ClosedIssues => "No closed issues.",
 			Self::ClosedPullRequests => "No closed pull requests.",
+			Self::Releases => "No releases.",
 		}
 	}
 }
 
 impl Section {
-	const ALL: [Self; 5] =
-		[Self::Commits, Self::Issues, Self::PullRequests, Self::ClosedIssues, Self::ClosedPullRequests];
+	const ALL: [Self; 6] =
+		[Self::Commits, Self::Issues, Self::PullRequests, Self::ClosedIssues, Self::ClosedPullRequests, Self::Releases];
 
-	/// Which issues the section lists, or `None` for commits.
+	/// Which issues the section lists, or `None` for commits and releases.
 	const fn issue_state(self) -> Option<IssueState> {
 		match self {
-			Self::Commits => None,
+			Self::Commits | Self::Releases => None,
 			Self::Issues | Self::PullRequests => Some(IssueState::Open),
 			Self::ClosedIssues | Self::ClosedPullRequests => Some(IssueState::Closed),
 		}
@@ -100,39 +107,9 @@ pub fn open_repository<P: WxWidget + WxEvtHandler + Copy + 'static>(parent: P, c
 	let branches = BranchPicker::new(dialog);
 	let close_button = Button::builder(&dialog).with_id(ID_CANCEL).with_label("Close").build();
 	dialog.set_escape_id(ID_CANCEL);
-	let commits = Feed::new(
-		&sections,
-		lists,
-		|section| section == Section::Commits,
-		|_, commit: &Commit| Some((commit.sha.clone(), commit_label(commit))),
-	);
-	let open_issues = Feed::new(&sections, lists, |section| section.issue_state() == Some(IssueState::Open), issue_row);
-	let closed_issues =
-		Feed::new(&sections, lists, |section| section.issue_state() == Some(IssueState::Closed), issue_row);
-	// Held weakly, since the lists hold this and the feeds hold the lists. The feeds themselves
-	// live as long as this function does, which is as long as the dialog is up.
-	let at_end: Rc<dyn Fn(Section)> = {
-		let (commits, open_issues, closed_issues) =
-			(Rc::downgrade(&commits), Rc::downgrade(&open_issues), Rc::downgrade(&closed_issues));
-		let client = Arc::clone(&client);
-		Rc::new(move |section| match section.issue_state() {
-			None => {
-				if let Some(feed) = commits.upgrade() {
-					feed::load_more(dialog, &client, &feed, section);
-				}
-			}
-			Some(IssueState::Open) => {
-				if let Some(feed) = open_issues.upgrade() {
-					feed::load_more(dialog, &client, &feed, section);
-				}
-			}
-			Some(_) => {
-				if let Some(feed) = closed_issues.upgrade() {
-					feed::load_more(dialog, &client, &feed, section);
-				}
-			}
-		})
-	};
+	let feeds = RepositoryFeeds::new(&sections, lists);
+	let at_end = feeds.at_end(dialog, &client);
+	let RepositoryFeeds { commits, open_issues, closed_issues, releases } = feeds;
 	feed::on_reaching_oldest(&sections, lists, &at_end);
 	// Speaks what copying did. Made after the lists, so no screen reader takes it for a label.
 	let live_region = live::live_region(&dialog);
@@ -154,8 +131,9 @@ pub fn open_repository<P: WxWidget + WxEvtHandler + Copy + 'static>(parent: P, c
 		move || open_client.issues(&open_repo, IssueState::Open),
 		"Could Not Load Issues",
 	);
-	// Closed issues can run to hundreds, so they wait until someone looks.
+	// Closed issues can run to hundreds, so they wait until someone looks, as releases do.
 	let closed_requested = Cell::new(false);
+	let releases_requested = Cell::new(false);
 	sections.on_section_changed(move |section| {
 		branches.show(section == Section::Commits);
 		dialog.layout();
@@ -167,6 +145,16 @@ pub fn open_repository<P: WxWidget + WxEvtHandler + Copy + 'static>(parent: P, c
 				Rc::clone(&closed_issues),
 				move || closed_client.issues(&closed_repo, IssueState::Closed),
 				"Could Not Load Issues",
+			);
+		}
+		if section == Section::Releases && !releases_requested.replace(true) {
+			let (releases_client, releases_repo) = (Arc::clone(&client), repo.clone());
+			feed::start(
+				dialog,
+				Arc::clone(&client),
+				Rc::clone(&releases),
+				move || releases_client.releases(&releases_repo),
+				"Could Not Load Releases",
 			);
 		}
 	});
@@ -287,6 +275,76 @@ fn default_first(default: &str, names: impl Iterator<Item = String>) -> Vec<Stri
 	front.into_iter().chain(names.filter(|name| name != default)).collect()
 }
 
+/// The dialog's lists that GitHub hands out a page at a time.
+struct RepositoryFeeds {
+	commits: Shared<Section, Commit>,
+	open_issues: Shared<Section, Issue>,
+	closed_issues: Shared<Section, Issue>,
+	releases: Shared<Section, Release>,
+}
+
+impl RepositoryFeeds {
+	fn new(sections: &SectionedLists<Section>, lists: Lists) -> Self {
+		Self {
+			commits: Feed::new(
+				sections,
+				lists,
+				|section| section == Section::Commits,
+				|_, commit: &Commit| Some((commit.sha.clone(), commit_label(commit))),
+			),
+			open_issues: Feed::new(
+				sections,
+				lists,
+				|section| section.issue_state() == Some(IssueState::Open),
+				issue_row,
+			),
+			closed_issues: Feed::new(
+				sections,
+				lists,
+				|section| section.issue_state() == Some(IssueState::Closed),
+				issue_row,
+			),
+			releases: Feed::new(
+				sections,
+				lists,
+				|section| section == Section::Releases,
+				|_, release: &Release| Some(release_row(release)),
+			),
+		}
+	}
+
+	/// Loads more of a section's feed when its oldest row is reached. It holds the feeds weakly,
+	/// since the lists hold it and the feeds hold the lists. The feeds themselves live as long as
+	/// the dialog is up.
+	fn at_end(&self, dialog: Dialog, client: &Arc<Client>) -> Rc<dyn Fn(Section)> {
+		let (commits, open_issues) = (Rc::downgrade(&self.commits), Rc::downgrade(&self.open_issues));
+		let (closed_issues, releases) = (Rc::downgrade(&self.closed_issues), Rc::downgrade(&self.releases));
+		let client = Arc::clone(client);
+		Rc::new(move |section| match section {
+			Section::Commits => {
+				if let Some(feed) = commits.upgrade() {
+					feed::load_more(dialog, &client, &feed, section);
+				}
+			}
+			Section::Releases => {
+				if let Some(feed) = releases.upgrade() {
+					feed::load_more(dialog, &client, &feed, section);
+				}
+			}
+			Section::Issues | Section::PullRequests => {
+				if let Some(feed) = open_issues.upgrade() {
+					feed::load_more(dialog, &client, &feed, section);
+				}
+			}
+			Section::ClosedIssues | Section::ClosedPullRequests => {
+				if let Some(feed) = closed_issues.upgrade() {
+					feed::load_more(dialog, &client, &feed, section);
+				}
+			}
+		})
+	}
+}
+
 /// What the dialog's rows do: a commit opens as a page, an issue or pull request as its thread,
 /// and each copies its link on GitHub.
 fn row_actions(dialog: Dialog, client: &Arc<Client>, repo: &str) -> RowActions<Section> {
@@ -294,12 +352,17 @@ fn row_actions(dialog: Dialog, client: &Arc<Client>, repo: &str) -> RowActions<S
 	let open = Box::new(move |section, key: String| {
 		if section == Section::Commits {
 			open_commit(dialog, Arc::clone(&client), open_repo.clone(), key);
+		} else if section == Section::Releases {
+			open_release(dialog, Arc::clone(&client), open_repo.clone(), &key);
 		} else if let Ok(number) = key.parse() {
 			open_issue(dialog, Arc::clone(&client), open_repo.clone(), number);
 		}
 	});
 	let repo = repo.to_owned();
 	let link = Box::new(move |section: Section, key: &str| {
+		if section == Section::Releases {
+			return release_link(&repo, key);
+		}
 		let kind = match section {
 			Section::Commits => "commit",
 			_ if section.lists_pull_requests() => "pull",

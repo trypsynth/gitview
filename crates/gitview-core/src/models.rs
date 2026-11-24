@@ -537,6 +537,47 @@ impl SubjectDetails {
 	}
 }
 
+/// A release of a repository, with its files.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Release {
+	pub id: u64,
+	pub tag_name: String,
+	/// Its title, which can be left empty, when the tag stands in for it.
+	pub name: Option<String>,
+	pub prerelease: bool,
+	pub draft: bool,
+	/// When it was published; a draft hasn't been.
+	pub published_at: Option<String>,
+	pub html_url: String,
+	pub body: Option<String>,
+	/// GitHub's own rendering of `body`, when the request asked for it.
+	pub body_html: Option<String>,
+	#[serde(default)]
+	pub assets: Vec<Asset>,
+	/// The API addresses of the source code at its tag, as GitHub archives it.
+	pub zipball_url: Option<String>,
+	pub tarball_url: Option<String>,
+}
+
+impl Release {
+	/// Its title, or its tag when it has none.
+	#[must_use]
+	pub fn title(&self) -> &str {
+		self.name.as_deref().map(str::trim).filter(|name| !name.is_empty()).unwrap_or(&self.tag_name)
+	}
+}
+
+/// A file attached to a release.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Asset {
+	pub id: u64,
+	pub name: String,
+	pub size: u64,
+	pub download_count: u64,
+	/// Its address in the API, which downloads it with the sign-in, so private ones work too.
+	pub url: String,
+}
+
 /// What happened around a commit on GitHub: the pull requests it's in, and its checks.
 #[derive(Debug, Clone, Default)]
 pub struct CommitActivity {
