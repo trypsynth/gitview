@@ -380,6 +380,9 @@ impl MainWindow {
 			state: Rc::new(RefCell::new(state)),
 		};
 		window.fill_views();
+		// The list starts on the first view of the built-in order, which keeps it when the saved
+		// order is applied, so the first view of the saved order is chosen here.
+		window.sections.select(first);
 		window.bind_events();
 		window.update_filter_menu();
 		window.update_sort_menu();

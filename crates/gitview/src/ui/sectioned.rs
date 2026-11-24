@@ -152,6 +152,15 @@ impl<S: Copy + Eq + 'static> SectionedLists<S> {
 		}
 	}
 
+	/// Selects `section` in the sections list and shows its list, when it's one the list shows.
+	pub fn select(&self, section: S) {
+		let index = self.inner.order.borrow().iter().position(|shown| *shown == section);
+		if let Some(index) = index {
+			self.inner.sections.set_selection(u32::try_from(index).unwrap_or_default(), true);
+			self.choose(section);
+		}
+	}
+
 	pub fn current(&self) -> S {
 		self.inner.current.get()
 	}
