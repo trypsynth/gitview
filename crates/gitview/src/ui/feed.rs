@@ -9,10 +9,12 @@ use std::{
 };
 
 use gitview_core::{Client, Cursor, Error, Page};
-use key_chord::KeyChord;
 use quiet_list::{QuietList, Select};
 use serde::de::DeserializeOwned;
-use wx_utils::tasks::{background_blocking, spawn_for};
+use wx_utils::{
+	menu_label,
+	tasks::{background_blocking, spawn_for},
+};
 use wxdragon::{
 	clipboard::Clipboard,
 	prelude::*,
@@ -21,6 +23,12 @@ use wxdragon::{
 
 use super::{actions::Action, dialogs::is_plain_enter, keymap::Command, notice, sectioned::SectionedLists};
 use crate::config::{self, Lists};
+
+const ID_ROW_OPEN: i32 = ID_HIGHEST + 400;
+const ID_ROW_COPY: i32 = ID_HIGHEST + 401;
+const ID_ROW_COPY_KEY: i32 = ID_HIGHEST + 402;
+const ID_ROW_COPY_LINK: i32 = ID_HIGHEST + 403;
+const ID_ROW_OPEN_IN_BROWSER: i32 = ID_HIGHEST + 404;
 
 /// The key of the row shown in place of items. It is always the only row, so it cannot be
 /// mistaken for an item's key.
@@ -308,69 +316,186 @@ pub struct RowActions<S> {
 	/// Runs with a section and the chosen row's key, on Enter or a double-click.
 	pub open: Box<dyn Fn(S, String)>,
 	pub link: Link<S>,
+	/// What a section's menu calls opening a row, such as "&View details" for a commit.
+	pub open_label: fn(S) -> &'static str,
+	/// What a section's menu calls copying a row's key on its own, in a section whose keys are
+	/// worth copying, such as "Copy &SHA" for a commit.
+	pub copy_key: fn(S) -> Option<&'static str>,
+}
+
+/// The section and list a row menu was last opened on.
+type MenuTarget<S> = Rc<RefCell<Option<(S, Weak<QuietList<String>>)>>>;
+
+/// What can be done with a row, from a key or from its menu.
+#[derive(Clone, Copy)]
+enum RowAction {
+	Open,
+	Copy,
+	CopyKey,
+	CopyLink,
+	OpenInBrowser,
+}
+
+impl RowAction {
+	const fn from_id(id: i32) -> Option<Self> {
+		match id {
+			ID_ROW_OPEN => Some(Self::Open),
+			ID_ROW_COPY => Some(Self::Copy),
+			ID_ROW_COPY_KEY => Some(Self::CopyKey),
+			ID_ROW_COPY_LINK => Some(Self::CopyLink),
+			ID_ROW_OPEN_IN_BROWSER => Some(Self::OpenInBrowser),
+			_ => None,
+		}
+	}
+}
+
+/// A dialog's row actions, and where to say what they did.
+struct RowHandler<S> {
+	actions: RowActions<S>,
+	live_region: StaticText,
+	shortcuts: config::Shortcuts,
+}
+
+impl<S: FeedSection> RowHandler<S> {
+	/// Does `action` to the selected row of `list`, which lists `section`. A message row has no
+	/// key, so it opens nothing and has no link, but copies like any other row.
+	fn perform(&self, section: S, list: &QuietList<String>, action: RowAction) {
+		let key = list.selected().filter(|key| !key.is_empty());
+		let say = |message: &str| live_region::announce(self.live_region, message);
+		let link = || key.as_deref().map(|key| (self.actions.link)(section, key));
+		match action {
+			RowAction::Open => {
+				if let Some(key) = key {
+					(self.actions.open)(section, key);
+				}
+			}
+			RowAction::Copy => {
+				if let Some(label) = list.selected_label() {
+					copy_text(self.live_region, &label, "Copied.");
+				}
+			}
+			RowAction::CopyKey => {
+				if let Some(key) = &key {
+					copy_text(self.live_region, key, "Copied.");
+				}
+			}
+			RowAction::CopyLink => match link() {
+				Some(url) => copy_text(self.live_region, &url, "Link copied."),
+				None => say("No link to copy."),
+			},
+			RowAction::OpenInBrowser => match link() {
+				Some(url) => {
+					// Said first, before the browser takes the screen reader's attention.
+					say("Opening in browser.");
+					launch_default_browser(&url, BrowserLaunchFlags::Default);
+				}
+				None => say("No link to open."),
+			},
+		}
+	}
+
+	/// The menu for a row of `section`, showing the keys its items have.
+	fn menu(&self, section: S) -> Menu {
+		let key = |action| Command::Item(action).accelerator(&self.shortcuts);
+		let menu = Menu::builder().build();
+		menu.append(ID_ROW_OPEN, &menu_label((self.actions.open_label)(section), "Enter"), "", ItemKind::Normal);
+		menu.append_separator();
+		menu.append(ID_ROW_COPY, &menu_label("&Copy", &key(Action::Copy)), "", ItemKind::Normal);
+		if let Some(label) = (self.actions.copy_key)(section) {
+			menu.append(ID_ROW_COPY_KEY, label, "", ItemKind::Normal);
+		}
+		menu.append(ID_ROW_COPY_LINK, &menu_label("Copy &link", &key(Action::CopyLink)), "", ItemKind::Normal);
+		menu.append(
+			ID_ROW_OPEN_IN_BROWSER,
+			&menu_label("Open in &browser", &key(Action::OpenInBrowser)),
+			"",
+			ItemKind::Normal,
+		);
+		menu
+	}
 }
 
 /// Opens rows on Enter or a double-click, and copies a row or its link, or opens the link in the
-/// browser, on the keys the main window's Copy, Copy link and Open in browser have. A message row
-/// has no key, so it opens nothing and has no link, but copies like any other row. What a key did
-/// is said through `live_region`.
-pub fn on_rows<S: FeedSection>(sections: &SectionedLists<S>, live_region: StaticText, actions: RowActions<S>) {
-	let actions = Rc::new(actions);
+/// browser, on the keys the main window's Copy, Copy link and Open in browser have. The context
+/// menu of a row has the same, along with anything its section adds. What happened is said
+/// through `live_region`.
+pub fn on_rows<S: FeedSection>(
+	dialog: Dialog,
+	sections: &SectionedLists<S>,
+	live_region: StaticText,
+	actions: RowActions<S>,
+) {
 	let shortcuts = config::load().shortcuts;
 	let chord = |action| Command::Item(action).chord(&shortcuts);
-	let keys = Rc::new([chord(Action::Copy), chord(Action::CopyLink), chord(Action::OpenInBrowser)]);
-	for (section, list) in sections.lists() {
-		let opener = {
-			let (list, actions) = (Rc::downgrade(list), Rc::clone(&actions));
-			Rc::new(move || {
-				if let Some(key) = Weak::upgrade(&list).and_then(|list| list.selected()).filter(|key| !key.is_empty()) {
-					(actions.open)(section, key);
+	let keys = Rc::new([
+		(chord(Action::Copy), RowAction::Copy),
+		(chord(Action::CopyLink), RowAction::CopyLink),
+		(chord(Action::OpenInBrowser), RowAction::OpenInBrowser),
+	]);
+	let rows = Rc::new(RowHandler { actions, live_region, shortcuts });
+	// The section and list a menu was last opened on. Its choice reaches the dialog as a menu
+	// event, which has only the item's ID.
+	let menu_target: MenuTarget<S> = Rc::default();
+	{
+		let (rows, menu_target) = (Rc::clone(&rows), Rc::clone(&menu_target));
+		dialog.bind_internal(EventType::MENU, move |event| {
+			let target = menu_target.borrow().clone();
+			match (RowAction::from_id(event.get_id()), target) {
+				(Some(action), Some((section, list))) => {
+					if let Some(list) = list.upgrade() {
+						rows.perform(section, &list, action);
+					}
 				}
-			})
-		};
-		let open_on_activate = Rc::clone(&opener);
-		list.on_activate(move || open_on_activate());
-		let (reached, actions, keys) = (Rc::downgrade(list), Rc::clone(&actions), Rc::clone(&keys));
+				_ => event.skip(true),
+			}
+		});
+	}
+	for (section, list) in sections.lists() {
+		let (opened, activated) = (Rc::downgrade(list), Rc::clone(&rows));
+		list.on_activate(move || {
+			if let Some(list) = opened.upgrade() {
+				activated.perform(section, &list, RowAction::Open);
+			}
+		});
+		let (reached, pressed_on, keys) = (Rc::downgrade(list), Rc::clone(&rows), Rc::clone(&keys));
 		list.on_key_down(move |event| {
+			let Some(list) = reached.upgrade() else {
+				return false;
+			};
 			if is_plain_enter(event) {
-				opener();
+				pressed_on.perform(section, &list, RowAction::Open);
 				return true;
 			}
-			let (WindowEventData::Keyboard(key), Some(list)) = (event, reached.upgrade()) else {
+			let WindowEventData::Keyboard(key) = event else {
 				return false;
 			};
 			let Some(code) = key.get_key_code() else {
 				return false;
 			};
-			let pressed = |chord: &Option<KeyChord>| {
+			let pressed = keys.iter().find(|(chord, _)| {
 				chord
 					.as_ref()
 					.is_some_and(|chord| chord.matches(code, key.control_down(), key.alt_down(), key.shift_down()))
-			};
-			let [copy, copy_link, open_in_browser] = &*keys;
-			let link = || list.selected().filter(|key| !key.is_empty()).map(|key| (actions.link)(section, &key));
-			if pressed(copy) {
-				if let Some(label) = list.selected_label() {
-					copy_text(live_region, &label, "Copied.");
-				}
-			} else if pressed(copy_link) {
-				match link() {
-					Some(url) => copy_text(live_region, &url, "Link copied."),
-					None => live_region::announce(live_region, "No link to copy."),
-				}
-			} else if pressed(open_in_browser) {
-				match link() {
-					Some(url) => {
-						// Said first, before the browser takes the screen reader's attention.
-						live_region::announce(live_region, "Opening in browser.");
-						launch_default_browser(&url, BrowserLaunchFlags::Default);
-					}
-					None => live_region::announce(live_region, "No link to open."),
-				}
-			} else {
+			});
+			let Some(&(_, action)) = pressed else {
 				return false;
-			}
+			};
+			pressed_on.perform(section, &list, action);
 			true
+		});
+		let (shown_on, menu_rows, menu_target) = (Rc::downgrade(list), Rc::clone(&rows), Rc::clone(&menu_target));
+		list.on_context_menu(move || {
+			let Some(list) = shown_on.upgrade() else {
+				return;
+			};
+			// A row saying a list is empty has nothing to act on.
+			if list.selected().is_none_or(|key| key.is_empty()) {
+				return;
+			}
+			*menu_target.borrow_mut() = Some((section, Rc::downgrade(&list)));
+			let mut menu = menu_rows.menu(section);
+			list.popup_menu(&mut menu);
+			menu.destroy_menu();
 		});
 	}
 }

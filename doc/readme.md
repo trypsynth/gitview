@@ -80,6 +80,8 @@ An organization has only Profile, Repositories, and Followers. If an organizatio
 
 In the repository and user dialogs, `Ctrl+C`, `Ctrl+Shift+C`, and `Ctrl+B` copy the selected row, copy its link, and open it in your browser. They use the keys you set for Copy, Copy link, and Open in browser.
 
+The context key and `Shift+F10` show the same actions as a menu, with Open first. On a commit, Open is `View details`, and the menu also has `Copy SHA`, which copies the commit's full SHA.
+
 ## Threads
 - A thread lists the issue or pull request first, then its comments, oldest first.
 - `Enter` on a post shows it formatted.

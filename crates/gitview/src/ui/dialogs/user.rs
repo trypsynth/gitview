@@ -137,7 +137,12 @@ fn show_user_dialog(parent: &dyn WxWidget, client: Arc<Client>, profile: &UserPr
 	});
 	// Speaks what copying did. Made after the lists, so no screen reader takes it for a label.
 	let live_region = live::live_region(&dialog);
-	feed::on_rows(&sections, live_region, RowActions { open, link });
+	feed::on_rows(
+		dialog,
+		&sections,
+		live_region,
+		RowActions { open, link, open_label: |_| "&Open", copy_key: |_| None },
+	);
 	feeds.start(Section::Repositories, dialog, &client, &login);
 	// The rest wait until someone looks: a popular account's followers run to thousands.
 	// The profile is filled and the repositories asked for already.

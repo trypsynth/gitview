@@ -136,7 +136,7 @@ pub fn open_repository<P: WxWidget + WxEvtHandler + Copy + 'static>(parent: P, c
 	feed::on_reaching_oldest(&sections, lists, &at_end);
 	// Speaks what copying did. Made after the lists, so no screen reader takes it for a label.
 	let live_region = live::live_region(&dialog);
-	feed::on_rows(&sections, live_region, row_actions(dialog, &client, &repo));
+	feed::on_rows(dialog, &sections, live_region, row_actions(dialog, &client, &repo));
 	let (commits_client, commits_repo) = (Arc::clone(&client), repo.clone());
 	feed::start(
 		dialog,
@@ -307,7 +307,12 @@ fn row_actions(dialog: Dialog, client: &Arc<Client>, repo: &str) -> RowActions<S
 		};
 		format!("https://github.com/{repo}/{kind}/{key}")
 	});
-	RowActions { open, link }
+	RowActions {
+		open,
+		link,
+		open_label: |section| if section == Section::Commits { "&View details" } else { "&Open" },
+		copy_key: |section| (section == Section::Commits).then_some("Copy &SHA"),
+	}
 }
 
 fn issue_row(section: Section, issue: &Issue) -> Option<(String, String)> {
