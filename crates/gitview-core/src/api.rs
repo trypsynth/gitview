@@ -7,8 +7,9 @@ use crate::{
 	Error,
 	models::{
 		Branch, Check, CheckResult, CloseReason, Comment, Commit, CommitActivity, CommitDetails, Email, Issue,
-		IssueState, Notification, Profile, ProfileUpdate, PullRequestState, PullRequestSummary, Repository,
-		RepositoryKind, RepositoryOrder, SearchOrder, SocialAccount, StarredOrder, SubjectDetails, User, UserProfile,
+		IssueState, Notification, Profile, ProfileUpdate, PullRequestState, PullRequestStatus, PullRequestSummary,
+		Repository, RepositoryKind, RepositoryOrder, ReviewDecision, SearchOrder, SocialAccount, StarredOrder,
+		SubjectDetails, User, UserProfile,
 	},
 	page::{At, Connection, Cursor, Kind, Page, link},
 };
@@ -145,6 +146,60 @@ const COMMIT_ACTIVITY_QUERY: &str = "query($owner: String!, $name: String!, $oid
 	statusCheckRollup { contexts(first: 100) { nodes { __typename \
 	... on CheckRun { name status conclusion startedAt completedAt detailsUrl } \
 	... on StatusContext { context state targetUrl createdAt } } } } } } } }";
+
+/// What a pull request's state and its newest commit's checks look like in GraphQL.
+const PULL_REQUEST_STATUS_QUERY: &str = "query($owner: String!, $name: String!, $number: Int!) { \
+	repository(owner: $owner, name: $name) { pullRequest(number: $number) { isDraft reviewDecision mergeable \
+	commits(last: 1) { nodes { commit { statusCheckRollup { contexts(first: 100) { nodes { __typename \
+	... on CheckRun { name status conclusion startedAt completedAt detailsUrl } \
+	... on StatusContext { context state targetUrl createdAt } } } } } } } } } }";
+
+#[derive(Serialize)]
+struct PullRequestVariables<'a> {
+	owner: &'a str,
+	name: &'a str,
+	number: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PullRequestRepository {
+	repository: Option<PullRequestHolder>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PullRequestHolder {
+	pull_request: Option<PullRequestNodeStatus>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PullRequestNodeStatus {
+	is_draft: bool,
+	review_decision: Option<String>,
+	mergeable: String,
+	commits: GraphNodes<PullRequestCommit>,
+}
+
+#[derive(Deserialize)]
+struct PullRequestCommit {
+	commit: CommitRollup,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CommitRollup {
+	status_check_rollup: Option<Rollup>,
+}
+
+/// A rollup's checks, the ones that failed first.
+fn rollup_checks(rollup: Option<Rollup>) -> Vec<Check> {
+	let mut checks: Vec<Check> =
+		rollup.map(|rollup| rollup.contexts.nodes.into_iter().flatten().map(Check::from).collect()).unwrap_or_default();
+	checks.sort_by_key(|check| check.result);
+	checks
+}
 
 #[derive(Serialize)]
 struct CommitVariables<'a> {
@@ -467,12 +522,34 @@ impl Client {
 				url: pull.url,
 			})
 			.collect();
-		let mut checks: Vec<Check> = commit
-			.status_check_rollup
-			.map(|rollup| rollup.contexts.nodes.into_iter().flatten().map(Check::from).collect())
-			.unwrap_or_default();
-		checks.sort_by_key(|check| check.result);
-		Ok(CommitActivity { pull_requests, checks })
+		Ok(CommitActivity { pull_requests, checks: rollup_checks(commit.status_check_rollup) })
+	}
+
+	/// Where pull request `number` of `repo` (`owner/name`) stands: draft, review, conflicts, and
+	/// the checks on its newest commit, the ones that failed first.
+	pub fn pull_request_status(&self, repo: &str, number: u64) -> Result<PullRequestStatus, Error> {
+		let (owner, name) = repo.split_once('/').ok_or_else(|| Error::Graph(format!("{repo} isn't owner/name")))?;
+		let data: PullRequestRepository = self.graphql(
+			PULL_REQUEST_STATUS_QUERY,
+			PullRequestVariables { owner, name, number },
+			"pull request status",
+		)?;
+		let Some(pull) = data.repository.and_then(|repository| repository.pull_request) else {
+			return Ok(PullRequestStatus::default());
+		};
+		let review = match pull.review_decision.as_deref() {
+			Some("APPROVED") => Some(ReviewDecision::Approved),
+			Some("CHANGES_REQUESTED") => Some(ReviewDecision::ChangesRequested),
+			Some("REVIEW_REQUIRED") => Some(ReviewDecision::Required),
+			_ => None,
+		};
+		let newest = pull.commits.nodes.into_iter().flatten().next_back();
+		Ok(PullRequestStatus {
+			draft: pull.is_draft,
+			review,
+			conflicts: pull.mergeable == "CONFLICTING",
+			checks: rollup_checks(newest.and_then(|newest| newest.commit.status_check_rollup)),
+		})
 	}
 
 	/// Issues and pull requests in `repo` (`owner/name`), newest first.

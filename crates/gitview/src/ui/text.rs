@@ -1,3 +1,5 @@
+use std::fmt::Write;
+
 use chrono::{DateTime, Local};
 use gitview_core::models::{Check, CheckResult, Commit, Issue, Repository, User};
 use minijinja::context;
@@ -86,6 +88,27 @@ pub fn checks_summary(checks: &[Check]) -> String {
 	}
 	counts.sort_by_key(|(result, _)| *result);
 	counts.iter().map(|(result, count)| format!("{count} {}", result.label())).collect::<Vec<_>>().join(", ")
+}
+
+/// Checks as a page lists them: each one's name, linking to its page when it has one, how it
+/// went, and how long it took once it finished.
+pub fn checks_html(checks: &[Check]) -> String {
+	let mut html = String::from("<ul>");
+	for check in checks {
+		let mut name = web::escape(&check.name);
+		if let Some(url) = &check.url {
+			name = format!("<a href=\"{}\">{name}</a>", web::escape(url));
+		}
+		let mut how = check.result.label().to_owned();
+		let took = check.started.as_deref().zip(check.finished.as_deref());
+		if let Some(took) = took.and_then(|(started, finished)| duration(started, finished)) {
+			how = format!("{how}, {took}");
+		}
+		// Writing to a String can't fail.
+		let _ = write!(html, "<li>{name}: {how}</li>");
+	}
+	html.push_str("</ul>");
+	html
 }
 
 /// How long something took between two GitHub timestamps, such as "45 seconds" or "3 minutes",

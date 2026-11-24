@@ -84,6 +84,8 @@ The context key and `Shift+F10` show the same actions as a menu, with Open first
 
 ## Threads
 - A thread lists the issue or pull request first, then its comments, oldest first.
+- The list's name says whether it's open, closed, or merged, and how many comments it has. For a pull request it also says whether it's a draft, its review, such as `Approved` or `Changes requested`, whether it has conflicts, and how many of its checks passed.
+- On a pull request with checks, the `Checks...` button lists each check on its newest commit, failures first, with how long it took. A check's name opens its page in your browser.
 - `Enter` on a post shows it formatted.
 - The context menu of a post has `Reply with quote...`, `Copy text`, `Copy link`, and `Open in browser`.
 - The `Comment...` button adds a comment. `Ctrl+Enter` posts it.

@@ -533,6 +533,36 @@ impl PullRequestState {
 	}
 }
 
+/// Where a pull request stands: whether it's a draft, its review, whether it merges cleanly, and
+/// the checks on its newest commit.
+#[derive(Debug, Clone, Default)]
+pub struct PullRequestStatus {
+	pub draft: bool,
+	pub review: Option<ReviewDecision>,
+	/// Whether it conflicts with the branch it would merge into.
+	pub conflicts: bool,
+	pub checks: Vec<Check>,
+}
+
+/// What a pull request's reviews add up to, when its repository asks for reviews.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReviewDecision {
+	Approved,
+	ChangesRequested,
+	Required,
+}
+
+impl ReviewDecision {
+	#[must_use]
+	pub const fn label(self) -> &'static str {
+		match self {
+			Self::Approved => "Approved",
+			Self::ChangesRequested => "Changes requested",
+			Self::Required => "Review required",
+		}
+	}
+}
+
 /// One check on a commit: a check run, such as a GitHub Actions job, or a status another service
 /// set.
 #[derive(Debug, Clone)]

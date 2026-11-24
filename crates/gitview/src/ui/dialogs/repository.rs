@@ -10,7 +10,7 @@ use std::{
 
 use gitview_core::{
 	Client, Error,
-	models::{ChangedFile, Check, Commit, CommitActivity, CommitDetails, Issue, IssueState, Parent},
+	models::{ChangedFile, Commit, CommitActivity, CommitDetails, Issue, IssueState, Parent},
 };
 use wx_utils::{
 	dialog_padding,
@@ -25,7 +25,7 @@ use crate::{
 		feed::{self, Feed, FeedSection, RowActions, Shared},
 		live, notice,
 		sectioned::SectionedLists,
-		text::{self, checks_summary, commit_label, count, duration, local_time},
+		text::{self, checks_html, checks_summary, commit_label, count, local_time},
 		web,
 	},
 };
@@ -378,11 +378,8 @@ fn commit_page(details: &CommitDetails, activity: Option<&CommitActivity>) -> St
 	}
 	page.push_str("</ul>");
 	if !checks.is_empty() {
-		page.push_str("<h2>Checks</h2><ul>");
-		for check in checks {
-			page.push_str(&check_line(check));
-		}
-		page.push_str("</ul>");
+		page.push_str("<h2>Checks</h2>");
+		page.push_str(&checks_html(checks));
 	}
 	let files = u64::try_from(details.files.len()).unwrap_or(u64::MAX);
 	// Writing to a String can't fail.
@@ -432,25 +429,6 @@ fn commit_details(commit: &Commit) -> Vec<String> {
 		_ => {}
 	}
 	lines
-}
-
-/// One check as the Checks section lists it: its name, linking to its page when it has one, how
-/// it went, and how long it took once it finished.
-fn check_line(check: &Check) -> String {
-	let mut name = web::escape(&check.name);
-	if let Some(url) = &check.url {
-		name = format!("<a href=\"{}\">{name}</a>", web::escape(url));
-	}
-	let mut how = check.result.label().to_owned();
-	if let Some(took) = check
-		.started
-		.as_deref()
-		.zip(check.finished.as_deref())
-		.and_then(|(started, finished)| duration(started, finished))
-	{
-		how = format!("{how}, {took}");
-	}
-	format!("<li>{name}: {how}</li>")
 }
 
 /// How one file changed, such as "Modified src/main.rs: 3 additions, 1 deletion".

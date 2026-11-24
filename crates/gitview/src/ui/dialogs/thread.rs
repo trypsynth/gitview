@@ -1,8 +1,8 @@
-use std::{cell::RefCell, rc::Rc, sync::Arc};
+use std::{cell::RefCell, fmt::Write, rc::Rc, sync::Arc};
 
 use gitview_core::{
 	Client, html_to_text,
-	models::{Comment, Issue},
+	models::{Comment, Issue, PullRequestStatus},
 };
 use wx_utils::{
 	dialog_padding,
@@ -19,7 +19,7 @@ use crate::{
 	template,
 	ui::{
 		live, notice,
-		text::{body_html, comment_count, local_time},
+		text::{body_html, checks_html, checks_summary, comment_count, local_time},
 	},
 };
 
@@ -134,27 +134,49 @@ pub fn open_issue<P: WxWidget + WxEvtHandler + Copy + 'static>(
 	let (comments_client, comments_repo) = (Arc::clone(&client), repo.clone());
 	let comments = background_blocking(move || comments_client.comments(&comments_repo, number));
 	spawn_for(&parent, async move {
-		let fetched = match issue.await {
-			Ok(issue) => comments.await.map(|comments| (issue, comments)),
-			Err(error) => Err(error),
+		let issue = match issue.await {
+			Ok(issue) => issue,
+			Err(error) => {
+				notice::error(&parent, error, "Could Not Open Issue");
+				return;
+			}
 		};
-		match fetched {
-			Ok((issue, comments)) => show_thread_dialog(&parent, client, repo, &issue, &comments),
-			Err(error) => notice::error(&parent, error, "Could Not Open Issue"),
-		}
+		// A pull request's review and checks, asked for while the comments are still coming.
+		let status = issue.is_pull_request().then(|| {
+			let (client, repo) = (Arc::clone(&client), repo.clone());
+			background_blocking(move || client.pull_request_status(&repo, number))
+		});
+		let comments = match comments.await {
+			Ok(comments) => comments,
+			Err(error) => {
+				notice::error(&parent, error, "Could Not Open Issue");
+				return;
+			}
+		};
+		// Without it, as when an organization keeps third-party apps out, the thread goes without.
+		let status = match status {
+			Some(status) => status
+				.await
+				.inspect_err(|error| tracing::warn!(%error, "couldn't load a pull request's review and checks"))
+				.ok(),
+			None => None,
+		};
+		show_thread_dialog(&parent, client, repo, &issue, &comments, status.as_ref());
 	});
 }
 
-fn show_thread_dialog(parent: &dyn WxWidget, client: Arc<Client>, repo: String, issue: &Issue, comments: &[Comment]) {
+fn show_thread_dialog(
+	parent: &dyn WxWidget,
+	client: Arc<Client>,
+	repo: String,
+	issue: &Issue,
+	comments: &[Comment],
+	status: Option<&PullRequestStatus>,
+) {
 	let number = issue.number;
 	let dialog = Dialog::builder(parent, &format!("{repo}#{number}: {}", issue.title)).build();
 	let padding = dialog_padding(&dialog);
-	let summary = format!(
-		"{} {}, {}.",
-		if issue.is_pull_request() { "Pull request" } else { "Issue" },
-		issue.state,
-		comment_count(issue.comments),
-	);
+	let summary = thread_summary(issue, status);
 	let label = StaticText::builder(&dialog).with_label(&format!("&Thread. {summary}")).build();
 	let list = ListBox::builder(&dialog).with_size(THREAD_SIZE).build();
 	// Speaks what copying did. Made after the list, so no screen reader takes it for its label.
@@ -168,6 +190,14 @@ fn show_thread_dialog(parent: &dyn WxWidget, client: Arc<Client>, repo: String, 
 	list.set_selection(0, true);
 	let posts = Rc::new(RefCell::new(posts));
 	let comment_button = Button::builder(&dialog).with_label("&Comment...").build();
+	// A pull request's checks, each with its link, on a page of their own.
+	let checks = status.map(|status| status.checks.clone()).filter(|checks| !checks.is_empty());
+	let checks_button = checks.map(|checks| {
+		let button = Button::builder(&dialog).with_label("Chec&ks...").build();
+		let heading = format!("Checks on #{number}");
+		button.on_click(move |_| show_page(&dialog, &heading, &checks_summary(&checks), &checks_html(&checks)));
+		button
+	});
 	let close_button = Button::builder(&dialog).with_id(ID_CANCEL).with_label("Close").build();
 	dialog.set_escape_id(ID_CANCEL);
 	// Handlers get a copy of the post, since replying opens a dialog, and a comment finishing
@@ -208,6 +238,9 @@ fn show_thread_dialog(parent: &dyn WxWidget, client: Arc<Client>, repo: String, 
 	bind_post_menu(list, live_region, selected_post, open_post, reply);
 	let button_row = BoxSizer::builder(Orientation::Horizontal).build();
 	button_row.add(&comment_button, 0, SizerFlag::empty(), 0);
+	if let Some(checks_button) = &checks_button {
+		button_row.add(checks_button, 0, SizerFlag::Left, padding);
+	}
 	button_row.add_stretch_spacer(1);
 	button_row.add(&close_button, 0, SizerFlag::empty(), 0);
 	let content = BoxSizer::builder(Orientation::Vertical).build();
@@ -227,6 +260,31 @@ fn show_thread_dialog(parent: &dyn WxWidget, client: Arc<Client>, repo: String, 
 }
 
 /// The context menu on a post, and what its choices do.
+/// What the thread's label says about it: its kind, state, and comments, and for a pull request
+/// whether it's a draft, its review, whether it conflicts, and its checks, each only when there's
+/// something to say.
+fn thread_summary(issue: &Issue, status: Option<&PullRequestStatus>) -> String {
+	let kind = if issue.is_pull_request() { "Pull request" } else { "Issue" };
+	let draft = if status.is_some_and(|status| status.draft) { ", draft" } else { "" };
+	// GitHub calls a merged pull request closed, which undersells it.
+	let state = if issue.is_merged() { "merged" } else { issue.state.as_str() };
+	let mut summary = format!("{kind} {state}{draft}, {}.", comment_count(issue.comments));
+	let Some(status) = status else {
+		return summary;
+	};
+	if let Some(review) = status.review {
+		// Writing to a String can't fail.
+		let _ = write!(summary, " {}.", review.label());
+	}
+	if status.conflicts && issue.is_open() {
+		summary.push_str(" Has conflicts.");
+	}
+	if !status.checks.is_empty() {
+		let _ = write!(summary, " Checks: {}.", checks_summary(&status.checks));
+	}
+	summary
+}
+
 fn bind_post_menu(
 	list: ListBox,
 	live_region: StaticText,
