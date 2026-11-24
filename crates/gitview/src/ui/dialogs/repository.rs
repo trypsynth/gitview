@@ -10,7 +10,7 @@ use std::{
 
 use gitview_core::{
 	Client, Error,
-	models::{ChangedFile, Commit, CommitDetails, Issue, IssueState},
+	models::{ChangedFile, Commit, CommitDetails, Issue, IssueState, Parent},
 };
 use wx_utils::{
 	dialog_padding,
@@ -347,6 +347,12 @@ fn commit_page(details: &CommitDetails) -> String {
 	if !description.is_empty() {
 		page.push_str(&web::paragraph(description));
 	}
+	page.push_str("<h2>Details</h2><ul>");
+	for line in commit_details(&details.commit) {
+		// Writing to a String can't fail.
+		let _ = write!(page, "<li>{}</li>", web::escape(&line));
+	}
+	page.push_str("</ul>");
 	let files = u64::try_from(details.files.len()).unwrap_or(u64::MAX);
 	// Writing to a String can't fail.
 	let _ = write!(
@@ -361,6 +367,40 @@ fn commit_page(details: &CommitDetails) -> String {
 	}
 	page.push_str("</ul>");
 	page
+}
+
+/// The lines of a commit's Details: its SHA, who wrote it, who committed it when that was
+/// someone else, the commits it follows, and its signature when it has one.
+fn commit_details(commit: &Commit) -> Vec<String> {
+	let person = |name: &str, login: Option<&str>, date: &str| match login {
+		Some(login) if login != name => format!("{name} ({login}), {}", local_time(date)),
+		_ => format!("{name}, {}", local_time(date)),
+	};
+	let data = &commit.commit;
+	let mut lines = vec![
+		format!("SHA: {}", commit.sha),
+		format!("Author: {}", person(&data.author.name, commit.author_login(), &data.author.date)),
+	];
+	if commit.committed_by_someone_else() {
+		lines.push(format!(
+			"Committer: {}",
+			person(&data.committer.name, commit.committer_login(), &data.committer.date)
+		));
+	}
+	let parents: Vec<&str> = commit.parents.iter().map(Parent::short_sha).collect();
+	lines.push(match parents.as_slice() {
+		[] => "No parents: the repository's first commit.".to_owned(),
+		[parent] => format!("Parent: {parent}"),
+		parents => format!("Parents: {}. A merge commit.", parents.join(", ")),
+	});
+	match &data.verification {
+		Some(verification) if verification.verified => lines.push("Signature: verified".to_owned()),
+		Some(verification) if verification.reason != "unsigned" => {
+			lines.push(format!("Signature: not verified, {}", verification.reason.replace('_', " ")));
+		}
+		_ => {}
+	}
+	lines
 }
 
 /// How one file changed, such as "Modified src/main.rs: 3 additions, 1 deletion".
@@ -382,9 +422,70 @@ fn file_line(file: &ChangedFile) -> String {
 
 #[cfg(test)]
 mod tests {
-	use gitview_core::models::ChangedFile;
+	use gitview_core::models::{ChangedFile, Commit, CommitAccount, CommitData, GitAuthor, Parent, Verification};
 
-	use super::{default_first, file_line};
+	use super::{commit_details, default_first, file_line};
+
+	fn person(name: &str) -> GitAuthor {
+		// An empty date reads as itself, so the lines don't depend on the time zone.
+		GitAuthor { name: name.to_owned(), date: String::new() }
+	}
+
+	fn account(login: &str) -> CommitAccount {
+		CommitAccount { login: Some(login.to_owned()) }
+	}
+
+	#[test]
+	fn a_commit_of_your_own_lists_its_sha_author_and_parent() {
+		let commit = Commit {
+			sha: "37fe18585bb0d23f01282c32b484c36ba6a37cec".to_owned(),
+			html_url: String::new(),
+			commit: CommitData {
+				message: "Suggest people to mention".to_owned(),
+				author: person("Quin Gillespie"),
+				committer: person("Quin Gillespie"),
+				verification: Some(Verification { verified: false, reason: "unsigned".to_owned() }),
+			},
+			author: Some(account("trypsynth")),
+			committer: Some(account("trypsynth")),
+			parents: vec![Parent { sha: "6b55bc7fff91dcb76e32abb482e55b61009729ff".to_owned() }],
+		};
+		assert_eq!(
+			commit_details(&commit),
+			[
+				"SHA: 37fe18585bb0d23f01282c32b484c36ba6a37cec",
+				"Author: Quin Gillespie (trypsynth), ",
+				"Parent: 6b55bc7",
+			]
+		);
+	}
+
+	#[test]
+	fn a_merge_on_github_lists_its_committer_parents_and_signature() {
+		let commit = Commit {
+			sha: "82e24d1".to_owned(),
+			html_url: String::new(),
+			commit: CommitData {
+				message: "Merge pull request #267".to_owned(),
+				author: person("Allen Dang"),
+				committer: person("GitHub"),
+				verification: Some(Verification { verified: true, reason: "valid".to_owned() }),
+			},
+			author: Some(account("AllenDang")),
+			committer: Some(account("web-flow")),
+			parents: vec![Parent { sha: "2772402aaaa".to_owned() }, Parent { sha: "4e73e06bbbb".to_owned() }],
+		};
+		assert_eq!(
+			commit_details(&commit),
+			[
+				"SHA: 82e24d1",
+				"Author: Allen Dang (AllenDang), ",
+				"Committer: GitHub (web-flow), ",
+				"Parents: 2772402, 4e73e06. A merge commit.",
+				"Signature: verified",
+			]
+		);
+	}
 
 	fn names(names: &[&str]) -> Vec<String> {
 		names.iter().map(|name| (*name).to_owned()).collect()

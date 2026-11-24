@@ -115,6 +115,12 @@ pub struct Commit {
 	/// The account the commit's author address belongs to. An address GitHub doesn't know leaves
 	/// it out, or sends an empty one.
 	pub author: Option<CommitAccount>,
+	/// The account the committer's address belongs to, as for the author.
+	#[serde(default)]
+	pub committer: Option<CommitAccount>,
+	/// The commits this one follows: none for the first commit, two or more for a merge.
+	#[serde(default)]
+	pub parents: Vec<Parent>,
 }
 
 impl Commit {
@@ -141,6 +147,42 @@ impl Commit {
 	pub fn author_name(&self) -> &str {
 		self.author.as_ref().and_then(|account| account.login.as_deref()).unwrap_or(&self.commit.author.name)
 	}
+
+	/// The author's GitHub login, when their address has an account.
+	#[must_use]
+	pub fn author_login(&self) -> Option<&str> {
+		self.author.as_ref().and_then(|account| account.login.as_deref())
+	}
+
+	/// The committer's GitHub login, when their address has an account.
+	#[must_use]
+	pub fn committer_login(&self) -> Option<&str> {
+		self.committer.as_ref().and_then(|account| account.login.as_deref())
+	}
+
+	/// Whether someone other than the author committed it, as GitHub does when merging on its
+	/// site, or someone does when applying another's change.
+	#[must_use]
+	pub fn committed_by_someone_else(&self) -> bool {
+		match (self.author_login(), self.committer_login()) {
+			(Some(author), Some(committer)) => !author.eq_ignore_ascii_case(committer),
+			_ => self.commit.author.name != self.commit.committer.name,
+		}
+	}
+}
+
+/// A commit another one follows.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Parent {
+	pub sha: String,
+}
+
+impl Parent {
+	/// The first seven characters of the hash, as GitHub shows it.
+	#[must_use]
+	pub fn short_sha(&self) -> &str {
+		self.sha.get(..7).unwrap_or(&self.sha)
+	}
 }
 
 /// The GitHub account behind a commit. Its login is missing when GitHub sends an empty account,
@@ -155,6 +197,19 @@ pub struct CommitAccount {
 pub struct CommitData {
 	pub message: String,
 	pub author: GitAuthor,
+	/// Who made the commit, which can differ from who wrote the change.
+	pub committer: GitAuthor,
+	/// Whether the commit is signed, and whether GitHub could check the signature.
+	#[serde(default)]
+	pub verification: Option<Verification>,
+}
+
+/// What GitHub found checking a commit's signature.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Verification {
+	pub verified: bool,
+	/// Why, such as `valid`, `unsigned` or `unknown_key`.
+	pub reason: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -455,9 +510,29 @@ mod tests {
 			commit: CommitData {
 				message: message.to_owned(),
 				author: GitAuthor { name: "Quin Gillespie".to_owned(), date: String::new() },
+				committer: GitAuthor { name: "Quin Gillespie".to_owned(), date: String::new() },
+				verification: None,
 			},
 			author: author.map(|login| CommitAccount { login: Some(login.to_owned()) }),
+			committer: author.map(|login| CommitAccount { login: Some(login.to_owned()) }),
+			parents: Vec::new(),
 		}
+	}
+
+	#[test]
+	fn a_commit_merged_on_github_has_someone_else_committing_it() {
+		let own = commit("Fix the list", Some("trypsynth"));
+		assert!(!own.committed_by_someone_else());
+		let mut merged = commit("Merge pull request #3", Some("trypsynth"));
+		merged.committer = Some(CommitAccount { login: Some("web-flow".to_owned()) });
+		merged.commit.committer.name = "GitHub".to_owned();
+		assert!(merged.committed_by_someone_else());
+		// Without accounts, the names in the commit tell.
+		let mut applied = commit("Fix the list", None);
+		applied.committer = None;
+		assert!(!applied.committed_by_someone_else());
+		applied.commit.committer.name = "Someone Else".to_owned();
+		assert!(applied.committed_by_someone_else());
 	}
 
 	#[test]
@@ -495,7 +570,8 @@ mod tests {
 	fn an_empty_account_falls_back_to_the_name_in_the_commit() {
 		let commit: Commit = serde_json::from_str(
 			r#"{"sha": "8306b27", "html_url": "", "author": {},
-			"commit": {"message": "Refactor", "author": {"name": "Sourcery AI", "date": ""}}}"#,
+			"commit": {"message": "Refactor", "author": {"name": "Sourcery AI", "date": ""},
+			"committer": {"name": "Sourcery AI", "date": ""}}}"#,
 		)
 		.expect("a commit whose author GitHub couldn't match");
 		assert_eq!(commit.author_name(), "Sourcery AI");

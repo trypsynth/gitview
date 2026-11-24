@@ -58,7 +58,7 @@ To change the order of the views, select one and press `Shift+Up` or `Shift+Down
 
 ## Repositories
 `Enter` on a repository opens it in a dialog. The Sections list chooses what the list beside it shows:
-- Commits, from the branch chosen in `Branch`. `Enter` on a commit shows its message and the files it changed.
+- Commits, from the branch chosen in `Branch`. `Enter` on a commit shows its message, its details, and the files it changed. The details are its full SHA, its author, its committer when that is someone else, its parents, and whether its signature is verified.
 - Issues and Pull requests that are open.
 - Closed issues and Closed pull requests. Gitview loads these the first time you choose them.
 
